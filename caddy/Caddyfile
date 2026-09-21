@@ -1,0 +1,53 @@
+{
+	email {$TLS_EMAIL}
+}
+
+(app) {
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy pocketbase:8090
+	}
+
+	handle /_/* {
+		reverse_proxy pocketbase:8090
+	}
+
+	handle /export/* {
+		reverse_proxy exporter:8000
+	}
+
+	handle {
+		root * /srv
+
+		# Never cache the service worker, or phones keep running an old app.
+		@sw path /sw.js
+		header @sw Cache-Control "no-cache, no-store, must-revalidate"
+
+		@static path *.png *.woff2 *.webmanifest
+		header @static Cache-Control "public, max-age=604800"
+
+		header {
+			X-Content-Type-Options nosniff
+			X-Frame-Options SAMEORIGIN
+			Referrer-Policy strict-origin-when-cross-origin
+			-Server
+		}
+
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Public site with an automatic certificate. When APP_DOMAIN is the
+# placeholder "lan.invalid" this block simply never matches a real request.
+{$APP_DOMAIN} {
+	import app
+}
+
+# Always available on the LAN for testing and for `make health`.
+# Plain HTTP, so service workers will not register here - phones need
+# the HTTPS name above for the offline install to work.
+:8080 {
+	import app
+}

@@ -1,0 +1,20 @@
+# Secrets and per-machine config — never commit these
+.env
+*.pem
+*.key
+
+# Runtime data. Lives in Docker volumes; a copy here would be a data leak.
+pb_data/
+backups/
+templates/
+
+# Source workbooks contain real customer point lists
+*.xlsm
+*.xlsx
+!web/sample/*.xlsm
+
+# Junk
+__pycache__/
+*.pyc
+.DS_Store
+*.swp
