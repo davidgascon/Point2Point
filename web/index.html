@@ -452,6 +452,10 @@ var SERVER_PROJECTS=[{"id":"kok","job":"86259065","name":"KOKUSAI","loc":"Hillsb
    ═══════════════════════════════════════════════════════════ */
 var LIVE = (typeof PocketBase !== "undefined");
 var pb = LIVE ? new PocketBase(location.origin) : null;
+// The built-in demo accounts exist only for the offline prototype. Against a
+// real server the roster comes from the users collection, so clear them or
+// their names leak into the UI before the first load completes.
+if(LIVE)TECHS={};
 
 function pbErr(e){
   var m=(e&&e.message)||String(e);
@@ -1117,12 +1121,15 @@ function vSignin(){
     '<input id="pw" type="password" autocomplete="current-password"/></div>'+
     '<button class="big" id="dosignin">Sign in</button>'+
     '<button class="ghost" id="toforgot">Forgot password</button></div>',
-    '<div class="who-pick">'+Object.keys(TECHS).map(function(k){
-      return'<button data-t="'+k+'" aria-pressed="'+(S.pick===k)+'">'+esc(TECHS[k].i)+'</button>'
-    }).join("")+'</div>'+
-    '<p style="font-size:12px;color:var(--faint)">Prototype — pick an account above, or '+
-    '<a href="#" id="tosignup" style="color:var(--accent)">create one</a>. '+
-    'The real build authenticates against the server.</p>');
+    (LIVE
+      ?'<p style="font-size:12.5px;color:var(--faint)">No account yet? '+
+       '<a href="#" id="tosignup" style="color:var(--accent)">Create one</a> — '+
+       'a lead still has to add you to a job.</p>'
+      :'<div class="who-pick">'+Object.keys(TECHS).map(function(k){
+        return'<button data-t="'+k+'" aria-pressed="'+(S.pick===k)+'">'+esc(TECHS[k].i)+'</button>'
+      }).join("")+'</div>'+
+      '<p style="font-size:12px;color:var(--faint)">Prototype — pick an account above, or '+
+      '<a href="#" id="tosignup" style="color:var(--accent)">create one</a>.</p>'));
 }
 function vSignup(){
   return authShell("Create your account",
@@ -1539,8 +1546,15 @@ function vNewProj(){
     pv.verified+' points already signed off on the sheet · '+
     pv.points.filter(function(p){return p.status==="Fail"}).length+' marked DNP · '+
     pv.points.filter(function(p){return p.p2pNA}).length+' marked N/A</div>'+
-    '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button>'+
-    '<button id="ncreate" style="background:var(--accent);color:#14100C">Create project</button></div>';
+    (m.err?'<div class="warn" style="margin:14px 0 0">'+esc(m.err)+'</div>':'')+
+    (m.progress
+      ?'<div class="tip" style="margin:14px 0 0"><b>'+esc(m.progress)+'</b>'+
+       'Leave this open until it finishes — it is writing every point to the server.</div>'
+      :'')+
+    '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)"'+
+    (m.busy?" disabled":"")+'>Cancel</button>'+
+    '<button id="ncreate" style="background:var(--accent);color:#14100C"'+
+    (m.busy?" disabled":"")+'>'+(m.busy?"Importing…":"Create project")+'</button></div>';
   return h+'</div></div>';
 }
 function vModal(){
@@ -2018,7 +2032,7 @@ function parseP2P(wb){
     var unit=String((col.unit!==undefined?row[col.unit]:"")||"").trim()||"Unassigned";
     var p2p=cellState(col.p2p!==undefined?row[col.p2p]:null);
     var inst=cellState(col.installed!==undefined?row[col.installed]:null);
-    var pt={id:++id,tag:tag,type:type||"-",
+    var pt={id:++id,sheetRow:r+1,tag:tag,type:type||"-",
       desc:String((col.desc!==undefined?row[col.desc]:"")||"").trim(),
       addr:String((col.addr!==undefined?row[col.addr]:"")||"").trim(),
       unit:unit,sys:String((col.panel!==undefined?row[col.panel]:"")||"").trim(),
@@ -2046,6 +2060,59 @@ function parseP2P(wb){
     units:Object.keys(uc).map(function(k){return[k,uc[k]]}),
     jobName:findLabel(grid,f.hdr,/job\s*name/i),
     jobNumber:findLabel(grid,f.hdr,/job\s*(number|#|no)/i)};
+}
+/* Create an imported project on the server. 456 points is 456 records, so
+   they go up in small concurrent batches with visible progress rather than
+   one long silent wait. */
+function pbCreateProject(pv,name,job,loc){
+  var projId=null,made=0,total=pv.points.length;
+  function setProgress(t){
+    if(S.modal){S.modal.progress=t;render()}
+  }
+  setProgress("Creating the project…");
+  return pb.collection("projects").create({
+    name:name,job:job,location:loc,status:"active",settings:{}
+  }).then(function(pr){
+    projId=pr.id;
+    // Whoever imports it is a lead on it, or they would not see their own job.
+    return pb.collection("project_members").create({
+      project:projId,user:S.user.id,role:"lead"
+    }).catch(function(){/* a duplicate membership is harmless */});
+  }).then(function(){
+    var queueIn=pv.points.slice(),withIssues=[];
+    function one(pt){
+      return pb.collection("points").create({
+        project:projId,unit:pt.unit,tag:pt.tag,type:pt.type,
+        descr:pt.desc,addr:pt.addr,controller:pt.sys,
+        sheet_row:pt.sheetRow||null,
+        status:pt.status||"",imported_by:pt.importedBy||"",
+        installed_by:pt.installedBy||"",p2p_na:!!pt.p2pNA,
+        checks:pt.checks||{},notes:pt.notes||""
+      }).then(function(rec){
+        made++;
+        if(pt.issue)withIssues.push({rec:rec,pt:pt});
+        if(made%25===0||made===total)setProgress("Loading points… "+made+" of "+total);
+      });
+    }
+    function chunk(){
+      if(!queueIn.length)return Promise.resolve();
+      return Promise.all(queueIn.splice(0,8).map(one)).then(chunk);
+    }
+    return chunk().then(function(){return withIssues});
+  }).then(function(withIssues){
+    if(!withIssues.length)return;
+    setProgress("Recording "+withIssues.length+" defects…");
+    return withIssues.reduce(function(ch,w){
+      return ch.then(function(){
+        return pb.collection("issues").create({
+          project:projId,scope:"point",point:w.rec.id,unit:w.pt.unit,
+          kind:"Defect",descr:w.pt.issue.desc,party:w.pt.issue.party||"Controls",
+          priority:w.pt.issue.priority||"Medium",hours:0,blocks:false,
+          resolved:false,by:S.user.id,at:w.pt.issue.at||Date.now()
+        }).catch(function(){/* one bad defect must not lose the import */});
+      });
+    },Promise.resolve());
+  }).then(function(){return projId});
 }
 function menuRow(id,icon,title,sub){
   return'<button class="unit" data-go="'+id+'" style="min-height:66px">'+
@@ -2450,7 +2517,10 @@ function bind(){
     }
     S.authErr=null;S.authOk="Signing in…";render();
     pb.collection("users").authWithPassword(em,pw).then(function(a){
-      if(a.record.active===false)throw new Error("That account has been switched off.");
+      // Deliberately no `active` check here. PocketBase already decides who may
+      // authenticate, and a client-side gate is both bypassable and a trap:
+      // an unticked checkbox on a new account would silently lock the person
+      // out with no way to tell why. Deactivation belongs in the dashboard.
       return pbLoadTechs().then(function(t){
         TECHS=t;
         S.user={id:a.record.id,n:a.record.name||a.record.email,
@@ -2463,8 +2533,12 @@ function bind(){
     }).then(function(){render();flush()})
       .catch(function(e){
         S.authOk=null;
-        S.authErr=/failed to authenticate/i.test(pbErr(e))
-          ? "Wrong email or password." : pbErr(e);
+        var msg=pbErr(e);
+        if(/failed to authenticate|invalid credentials/i.test(msg))
+          msg="Wrong email or password. Note that the dashboard superuser at /_/ "+
+              "is a separate login and cannot sign in here — you need a record in "+
+              "the users collection.";
+        S.authErr=msg;
         render();
       });
   });
@@ -2794,6 +2868,28 @@ function bind(){
     var nm=(el("njn")?el("njn").value:m.jobName).trim()||"Untitled job";
     var no=(el("njno")?el("njno").value:m.jobNumber).trim();
     var lc=(el("njloc")?el("njloc").value:m.loc||"").trim();
+
+    if(LIVE){
+      if(!online()){toast("Importing needs a connection");return}
+      m.busy=true;m.progress="Starting…";render();
+      pbCreateProject(pv,nm,no,lc||("Imported from "+pv.sheet)).then(function(projId){
+        S.modal=null;
+        return pull().then(function(){
+          toast(pv.points.length+" points imported");
+          S.proj=projId;S.unit=null;S.q="";S.filter="open";S.screen="units";
+          if(LIVE)pbSubscribe();
+          render();
+        });
+      }).catch(function(e){
+        var msg=pbErr(e);
+        if(/not allowed|forbidden|403/i.test(msg))
+          msg="Your account needs the lead or admin role to create a project.";
+        if(S.modal){S.modal.busy=false;S.modal.progress=null;S.modal.err=msg;render()}
+        else toast("Import failed: "+msg);
+      });
+      return;
+    }
+
     var p={id:"imp"+Date.now().toString(36),job:no||"—",name:nm,
       loc:lc||("Imported from "+pv.sheet),points:pv.points};
     S.projects=S.projects.concat([p]);
