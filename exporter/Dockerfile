@@ -12,5 +12,5 @@ COPY app.py .
 RUN useradd -m -u 10001 app && mkdir -p /templates && chown app /templates
 USER app
 
-EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8030
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8030"]

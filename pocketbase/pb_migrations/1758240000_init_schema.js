@@ -1,7 +1,12 @@
 /// <reference path="../pb_data/types.d.ts" />
 
 /**
- * Field Checkout — initial schema.
+ * Field Checkout — collections.
+ *
+ * Indexes live in the next migration on purpose. Creating them inline fails
+ * on some PocketBase versions because the helper builds its SQL before the
+ * new table's columns exist, and a failed index takes the whole migration
+ * down with it.
  *
  * Written against the PocketBase 0.23+ JS migration API (`migrate((app) => …)`).
  * If your pinned PB_VERSION is older than 0.23 the API is different
@@ -42,8 +47,6 @@ migrate(
     users.fields.add(new BoolField({ name: "active" }));
     users.fields.add(new TextField({ name: "phone", max: 40 }));
 
-    // Two people signing as "DG" would make the record ambiguous forever.
-    users.addIndex("idx_users_initials", true, "initials", "");
 
     // Nobody self-registers into the system; a lead or admin creates accounts.
     users.createRule = null;
@@ -131,7 +134,6 @@ migrate(
       deleteRule:
         "@request.auth.role = 'lead' || @request.auth.role = 'admin'",
     });
-    members.addIndex("idx_member_unique", true, "project, user", "");
     app.save(members);
 
     // --------------------------------------------------------------- points
@@ -181,8 +183,6 @@ migrate(
         "@collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
       deleteRule: "@request.auth.role = 'admin'",
     });
-    points.addIndex("idx_point_unique", true, "project, unit, tag", "");
-    points.addIndex("idx_point_project", false, "project", "");
     app.save(points);
 
     // --------------------------------------------------------------- events
@@ -227,8 +227,6 @@ migrate(
       updateRule: null,
       deleteRule: null,
     });
-    events.addIndex("idx_event_client", true, "client_id", "");
-    events.addIndex("idx_event_project_at", false, "project, at", "");
     app.save(events);
 
     // --------------------------------------------------------------- issues
@@ -300,7 +298,6 @@ migrate(
         "@collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
       deleteRule: "@request.auth.role = 'admin'",
     });
-    issues.addIndex("idx_issue_project", false, "project, resolved", "");
     app.save(issues);
   },
 
