@@ -1,10 +1,12 @@
 # Field Checkout — deployment
 
-Three containers behind Caddy on one Ubuntu VM.
+Three containers on one Ubuntu VM, behind your existing Nginx Proxy Manager.
+
+**Start with QUICKSTART.md** — this file is the long-form reference.
 
 | Service | What it does | Exposed |
 |---|---|---|
-| `caddy` | TLS, serves the app, proxies everything else | 80, 443 |
+| `web` | nginx: serves the app, routes /api and /export | one host port |
 | `pocketbase` | accounts, database, realtime, admin dashboard | internal |
 | `exporter` | writes data back into the original `.xlsm` | internal |
 

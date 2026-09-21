@@ -33,27 +33,25 @@ ps: ## what is running
 	$(DC) ps
 
 health: ## check every service answers
-	@set -a; source .env 2>/dev/null; set +a; \
-	if [ "$$APP_DOMAIN" = "lan.invalid" ]; then BASE=http://localhost:8080; \
-	else BASE=https://$$APP_DOMAIN; fi; \
+	@set -a; source .env 2>/dev/null; set +a; BASE=http://localhost:$${APP_PORT:-8080}; \
 	printf 'app       '; curl -sfo /dev/null -w '%{http_code}\n' $$BASE/ || echo DOWN; \
 	printf 'backend   '; curl -sf $$BASE/api/health  >/dev/null && echo ok || echo DOWN; \
-	printf 'exporter  '; curl -sf $$BASE/export/health >/dev/null && echo ok || echo DOWN
+	printf 'exporter  '; curl -sf $$BASE/export/health >/dev/null && echo ok || echo DOWN; \
+	printf 'public    '; curl -sfo /dev/null $${PUBLIC_URL}/api/health && echo ok || echo "not reachable via NPM"
 
 app: ## publish a new build of the app (FILE=index.html)
 	@test -n "$(FILE)" || { echo "usage: make app FILE=field_checkout.html"; exit 1; }
 	cp "$(FILE)" web/index.html
 	@# bump the cache name so phones pick it up instead of serving yesterday's app
 	@sed -i "s/fc-shell-v[0-9]*/fc-shell-v$$(date +%s)/" web/sw.js
-	$(DC) restart caddy
+	$(DC) restart web
 	@echo "Published. Phones update next time they open the app with signal."
 
 template: ## upload a project's source workbook (PROJECT=id FILE=x.xlsm TOKEN=...)
 	@test -n "$(PROJECT)" -a -n "$(FILE)" -a -n "$(TOKEN)" || \
 	  { echo "usage: make template PROJECT=<id> FILE=KOKUSAI_P2P.xlsm TOKEN=<lead token>"; exit 1; }
 	@set -a; source .env; set +a; \
-	if [ "$$APP_DOMAIN" = "lan.invalid" ]; then BASE=http://localhost:8080; \
-	else BASE=https://$$APP_DOMAIN; fi; \
+	BASE=http://localhost:$${APP_PORT:-8080}; \
 	curl -sf -X POST $$BASE/export/template/$(PROJECT) \
 	  -H "Authorization: Bearer $(TOKEN)" -F file=@$(FILE) && echo
 

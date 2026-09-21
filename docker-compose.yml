@@ -1,31 +1,28 @@
-# Field Checkout — deployment stack
+# Field Checkout — behind your existing Nginx Proxy Manager.
 #
-#   caddy       TLS termination, static app, reverse proxy      :80 :443
-#   pocketbase  auth, database, realtime, admin UI              internal :8090
-#   exporter    writes app data back into the .xlsm template    internal :8000
+#   web         nginx: serves the app, routes /api and /export   host :${APP_PORT}
+#   pocketbase  auth, database, realtime, admin dashboard        internal
+#   exporter    writes data back into the .xlsm template         internal
 #
-# Only Caddy publishes ports. PocketBase and the exporter are reachable
-# only through it, so nothing on the VM is exposed without TLS.
+# Only `web` publishes a port. Point one NPM proxy host at it and you are done.
 
 services:
-  caddy:
-    image: caddy:2-alpine
+  web:
+    image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-      - "8080:8080"      # LAN / health checks, no TLS
-    environment:
-      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env}
-      TLS_EMAIL: ${TLS_EMAIL:?set TLS_EMAIL in .env}
+      - "${APP_PORT:-8080}:8080"
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web:/srv:ro
-      - caddy_data:/data
-      - caddy_config:/config
     depends_on:
-      - pocketbase
-      - exporter
+      pocketbase:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
   pocketbase:
     build:
@@ -34,8 +31,8 @@ services:
         PB_VERSION: ${PB_VERSION:-0.29.3}
     restart: unless-stopped
     environment:
-      # Used by PocketBase for the links in password-reset emails.
-      PB_PUBLIC_URL: https://${APP_DOMAIN}
+      # Used for the links inside password-reset emails.
+      PB_PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
     volumes:
       - pb_data:/pb/pb_data
       - ./pocketbase/pb_migrations:/pb/pb_migrations
@@ -50,8 +47,6 @@ services:
     build: ./exporter
     restart: unless-stopped
     environment:
-      # The exporter verifies every caller's token against PocketBase
-      # before it will touch a template.
       PB_INTERNAL_URL: http://pocketbase:8090
     volumes:
       - templates:/templates
@@ -60,7 +55,14 @@ services:
         condition: service_healthy
 
 volumes:
-  pb_data:       # SQLite database, uploaded photos, auth records
-  templates:     # one original .xlsm per project, used as the export template
-  caddy_data:    # TLS certificates — do not delete, rate limits apply
-  caddy_config:
+  pb_data:     # database, photos, accounts
+  templates:   # one source workbook per project
+
+# If your Nginx Proxy Manager runs in its own compose stack and you would
+# rather route container-to-container than via a host port, uncomment this,
+# put `web` on the same network, and point NPM at http://field-checkout-web:8080.
+#
+# networks:
+#   default:
+#     name: npm_default
+#     external: true
