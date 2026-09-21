@@ -12,6 +12,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png"/>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<script src="/vendor/pocketbase.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -652,6 +653,13 @@ function applyEvent(ev,projects){
 }
 var SIM={events:[],claims:{}};
 function pushEvents(evs){
+  if(LIVE){
+    // Sequential on purpose: order matters for the audit trail, and a phone
+    // coming back from a dead zone should not open 40 sockets at once.
+    return evs.reduce(function(chain,ev){
+      return chain.then(function(){return pbSendEvent(ev)});
+    },Promise.resolve());
+  }
   return new Promise(function(res,rej){
     setTimeout(function(){
       if(!online())return rej();
@@ -673,6 +681,7 @@ function flush(){
 }
 var LIVE_SEEN=0;
 function liveTick(){
+  if(LIVE)return;                       // handled by the realtime subscription
   if(!online()||!S.projects.length||!S.user)return;
   var inc=SIM.events.filter(function(e){return e.at>LIVE_SEEN&&e.by!==S.user.id});
   if(!inc.length)return;
@@ -691,6 +700,7 @@ function liveTick(){
   if(msg)toast(msg+(inc.length>1?" +"+(inc.length-1)+" more":""));else render();
 }
 function coworkerTick(){
+  if(LIVE)return;                       // real people supply the updates now
   if(!online()||!S.projects.length||!S.user)return;
   var p=S.projects.filter(function(x){return x.id==="kok"})[0];if(!p)return;
   var mine=S.user.id;
@@ -2076,6 +2086,7 @@ function vProjSet(){
     '<div style="font-size:13px;color:var(--dim);line-height:1.6;margin-bottom:11px">'+
     'Passed points export as tech initials plus a short date — <span class="mono">RO 9/19</span>. '+
     'Failed points export as <span class="mono">DNP</span>. N/A stays N/A.</div>'+
+    (LIVE?'<button class="big" id="expxlsm">Export the P2P workbook</button>':'')+
     '<button class="ghost" id="expjson">Download update file (.json)</button>'+
     '<button class="ghost" id="expcsv">Download as CSV</button>'+
     '<div style="font-size:11.5px;color:var(--faint);margin-top:11px;line-height:1.6">'+
@@ -2133,6 +2144,16 @@ function vDevice(){
 
 /* ───────── actions ───────── */
 function pull(){
+  if(LIVE){
+    if(!online()){toast("No signal");return Promise.resolve()}
+    return pbLoadProjects().then(function(ps){
+      S.projects=ps;
+      return kvSet("projects",S.projects);
+    }).then(function(){
+      pbSubscribe();
+      if(!S.toast)toast("Up to date");
+    }).catch(function(e){toast(pbErr(e))});
+  }
   if(!online()){toast("No signal");return Promise.resolve()}
   var fresh=JSON.parse(JSON.stringify(SERVER_PROJECTS));
   SIM.events.forEach(function(e){applyEvent(e,fresh)});
@@ -2228,12 +2249,33 @@ function bind(){
   }
   all("[data-t]",function(b){b.addEventListener("click",function(){signInAs(b.dataset.t)})});
   on("dosignin","click",function(){
-    var em=(el("em").value||"").trim().toLowerCase();
-    var k=Object.keys(TECHS).filter(function(x){return(TECHS[x].email||"").toLowerCase()===em})[0];
-    if(!k){S.authErr="No account with that email. Ask your lead to set one up.";render();return}
-    if(TECHS[k].active===false){S.authErr="That account has been switched off.";render();return}
-    if(!(el("pw").value||"").length){S.authErr="Enter your password.";render();return}
-    signInAs(k);
+    var em=(el("em").value||"").trim(), pw=(el("pw").value||"");
+    if(!em||!pw){S.authErr="Enter your email and password.";render();return}
+    if(!LIVE){
+      var k=Object.keys(TECHS).filter(function(x){
+        return(TECHS[x].email||"").toLowerCase()===em.toLowerCase()})[0];
+      if(!k){S.authErr="No account with that email.";render();return}
+      signInAs(k);return;
+    }
+    S.authErr=null;S.authOk="Signing in…";render();
+    pb.collection("users").authWithPassword(em,pw).then(function(a){
+      if(a.record.active===false)throw new Error("That account has been switched off.");
+      return pbLoadTechs().then(function(t){
+        TECHS=t;
+        S.user={id:a.record.id,n:a.record.name||a.record.email,
+          i:(a.record.initials||"").toUpperCase()};
+        S.authOk=null;S.authErr=null;
+        kvSet("user",S.user);kvSet("pbAuth",pb.authStore.exportToCookie());
+        S.screen="projects";render();
+        return pull();
+      });
+    }).then(function(){render();flush()})
+      .catch(function(e){
+        S.authOk=null;
+        S.authErr=/failed to authenticate/i.test(pbErr(e))
+          ? "Wrong email or password." : pbErr(e);
+        render();
+      });
   });
   on("toforgot","click",function(){S.authMode="forgot";S.authErr=null;S.authOk=null;
     S.authEmail=(el("em")&&el("em").value)||"";render()});
@@ -2242,9 +2284,15 @@ function bind(){
   on("dosend","click",function(){
     var em=(el("fe").value||"").trim();
     if(!/.+@.+\..+/.test(em)){S.authErr="That does not look like an email address.";render();return}
-    S.authErr=null;S.authMode="signin";
-    S.authOk="If that address has an account, a reset link is on its way. It expires in an hour.";
-    render();
+    var done=function(){
+      S.authErr=null;S.authMode="signin";
+      S.authOk="If that address has an account, a reset link is on its way. It expires in an hour.";
+      render();
+    };
+    if(!LIVE)return done();
+    // Always report the same thing, so this cannot be used to discover
+    // which addresses have accounts.
+    pb.collection("users").requestPasswordReset(em).then(done).catch(done);
   });
   on("dosignup","click",function(){
     var n=(el("sun").value||"").trim(), i=(el("sui").value||"").trim().toUpperCase();
@@ -2258,11 +2306,34 @@ function bind(){
     }
     if(!/.+@.+\..+/.test(em)){S.authErr="Enter a valid work email.";render();return}
     if(pw.length<8){S.authErr="Password needs 8 characters or more.";render();return}
-    var id="u"+Date.now().toString(36);
-    TECHS[id]={n:n,i:i,email:em,role:"tech",active:true,last:0};
-    S.authMode="signin";S.authErr=null;
-    S.authOk="Account created. A lead still has to add you to a job.";
-    signInAs(id);
+    if(!LIVE){
+      var id="u"+Date.now().toString(36);
+      TECHS[id]={n:n,i:i,email:em,role:"tech",active:true,last:0};
+      S.authMode="signin";S.authErr=null;
+      S.authOk="Account created. A lead still has to add you to a job.";
+      signInAs(id);return;
+    }
+    S.authErr=null;S.authOk="Creating…";render();
+    pb.collection("users").create({email:em,password:pw,passwordConfirm:pw,
+      name:n,initials:i,role:"tech",active:true}).then(function(){
+      return pb.collection("users").authWithPassword(em,pw);
+    }).then(function(a){
+      return pbLoadTechs().then(function(t){
+        TECHS=t;
+        S.user={id:a.record.id,n:n,i:i};
+        S.authOk="Account created. A lead still has to add you to a job.";
+        S.authErr=null;kvSet("user",S.user);
+        kvSet("pbAuth",pb.authStore.exportToCookie());
+        S.screen="projects";render();return pull();
+      });
+    }).then(function(){render()})
+      .catch(function(e){
+        S.authOk=null;
+        var m=pbErr(e);
+        if(/initials/i.test(m))m='Those initials are already taken. They have to be unique.';
+        else if(/email/i.test(m))m="That email is already registered, or is not valid.";
+        S.authErr=m;render();
+      });
   });
 
   /* ---- menu and rollout screens ---- */
@@ -2275,6 +2346,8 @@ function bind(){
     render();
   })});
   on("signout","click",function(){
+    if(LIVE){try{pb.authStore.clear()}catch(e){}}
+    kvSet("pbAuth",null);
     S.user=null;S.screen="signin";S.authMode="signin";S.authErr=null;
     S.authOk="Signed out. Anything not yet sent is still on this phone.";
     kvSet("user",null);render();
@@ -2337,7 +2410,9 @@ function bind(){
   });
 
   all("[data-p]",function(b){b.addEventListener("click",function(){
-    S.proj=b.dataset.p;S.unit=null;S.q="";S.filter="open";S.screen="units";render()})});
+    S.proj=b.dataset.p;S.unit=null;S.q="";S.filter="open";S.screen="units";
+    if(LIVE)pbSubscribe();
+    render()})});
   all(".unitmain",function(b){b.addEventListener("click",function(){
     S.unit=b.dataset.u;S.filter="open";S.limit=60;S.selecting=false;S.sel={};S.screen="points";claimUnit();render()})});
   on("allu","click",function(){S.unit=null;S.filter="open";S.limit=60;S.selecting=false;S.sel={};S.screen="points";render()});
@@ -2382,6 +2457,27 @@ function bind(){
     p.job=(el("psj").value||"").trim()||p.job;
     p.loc=(el("psl").value||"").trim();
     kvSet("projects",S.projects).then(function(){toast("Project details saved")});
+  });
+  on("expxlsm","click",function(){
+    var p=proj();
+    toast("Building the workbook…");
+    fetch("/export/p2p/"+p.id,{
+      method:"POST",
+      headers:{"Content-Type":"application/json",
+        "Authorization":"Bearer "+pb.authStore.token},
+      body:JSON.stringify({filename:(p.job||"P2P")+"_"+shortDate(Date.now()).replace("/","-")+".xlsm",
+        points:exportRows(p)})
+    }).then(function(r){
+      if(!r.ok)return r.text().then(function(t){throw new Error(t.slice(0,200))});
+      var added=r.headers.get("X-Added-Points"),un=r.headers.get("X-Unmatched");
+      return r.blob().then(function(b){
+        var u=URL.createObjectURL(b),a=document.createElement("a");
+        a.href=u;a.download=(p.job||"P2P")+".xlsm";document.body.appendChild(a);a.click();
+        setTimeout(function(){URL.revokeObjectURL(u);a.remove()},1500);
+        toast("Exported"+(added&&added!=="0"?" — "+added+" added points on their own sheet":"")+
+          (un&&un!=="0"?" — "+un+" unmatched":""));
+      });
+    }).catch(function(e){toast("Export failed: "+pbErr(e))});
   });
   on("expjson","click",function(){
     var p=proj();
@@ -2675,6 +2771,33 @@ function bind(){
 /* ───────── boot ───────── */
 function freshCopy(){return JSON.parse(JSON.stringify(SERVER_PROJECTS))}
 
+function bootLive(){
+  return kvGet("pbAuth").then(function(c){
+    if(c){try{pb.authStore.loadFromCookie(c)}catch(e){}}
+    if(!pb.authStore.isValid)return false;
+    return pb.collection("users").authRefresh().then(function(a){
+      return pbLoadTechs().then(function(t){
+        TECHS=t;
+        S.user={id:a.record.id,n:a.record.name||a.record.email,
+          i:(a.record.initials||"").toUpperCase()};
+        S.screen="projects";
+        return true;
+      });
+    }).catch(function(){return false});
+  });
+}
+if(LIVE){
+  Promise.all([bootLive(),kvGet("projects"),qAll(),kvGet("prefs")]).then(function(r){
+    var signedIn=r[0];
+    // Cached points let the app open with no signal; the server refresh
+    // follows and overwrites them.
+    if(r[1]&&r[1].length)S.projects=r[1];
+    S.queue=r[2]||[];
+    if(r[3])S.prefs=Object.assign(S.prefs,r[3]);
+    render();
+    if(signedIn&&online())return pull().then(function(){flush()});
+  }).catch(function(e){S.authErr=pbErr(e);render()});
+}else
 kvGet("dataVersion").then(function(v){
   if(v===DATA_VERSION)return false;
   /* the bundled job changed — clear whatever this device was holding */
