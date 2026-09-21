@@ -12,6 +12,9 @@ RUN wget -q -O /tmp/pb.zip \
  && rm /tmp/pb.zip \
  && chmod +x /pb/pocketbase
 
+# Schema migrations travel in the image, so there is no bind mount to go wrong.
+COPY pb_migrations/ /pb/pb_migrations/
+
 EXPOSE 8090
 
 CMD ["/pb/pocketbase", "serve", \

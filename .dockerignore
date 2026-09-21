@@ -1,0 +1,7 @@
+.git
+backups
+*.md
+.env
+.env.example
+Makefile
+setup.sh

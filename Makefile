@@ -44,7 +44,7 @@ app: ## publish a new build of the app (FILE=index.html)
 	cp "$(FILE)" web/index.html
 	@# bump the cache name so phones pick it up instead of serving yesterday's app
 	@sed -i "s/fc-shell-v[0-9]*/fc-shell-v$$(date +%s)/" web/sw.js
-	$(DC) restart web
+	$(DC) up -d --build web
 	@echo "Published. Phones update next time they open the app with signal."
 
 template: ## upload a project's source workbook (PROJECT=id FILE=x.xlsm TOKEN=...)

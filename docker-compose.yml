@@ -4,17 +4,19 @@
 #   pocketbase  auth, database, realtime, admin dashboard        internal
 #   exporter    writes data back into the .xlsm template         internal
 #
-# Only `web` publishes a port. Point one NPM proxy host at it and you are done.
+# Everything is built into images — no bind mounts. Only named volumes hold
+# state, so a stack manager cannot break this by inventing empty folders.
+#
+# Deploy in Portainer as: Stacks -> Add stack -> Repository.
 
 services:
   web:
-    image: nginx:1.27-alpine
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8080}:8080"
-    volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./web:/srv:ro
     depends_on:
       pocketbase:
         condition: service_healthy
@@ -31,11 +33,10 @@ services:
         PB_VERSION: ${PB_VERSION:-0.29.3}
     restart: unless-stopped
     environment:
-      # Used for the links inside password-reset emails.
+      # Used in the links inside password-reset emails.
       PB_PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
     volumes:
       - pb_data:/pb/pb_data
-      - ./pocketbase/pb_migrations:/pb/pb_migrations
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/api/health"]
       interval: 30s
@@ -55,14 +56,7 @@ services:
         condition: service_healthy
 
 volumes:
-  pb_data:     # database, photos, accounts
-  templates:   # one source workbook per project
-
-# If your Nginx Proxy Manager runs in its own compose stack and you would
-# rather route container-to-container than via a host port, uncomment this,
-# put `web` on the same network, and point NPM at http://field-checkout-web:8080.
-#
-# networks:
-#   default:
-#     name: npm_default
-#     external: true
+  pb_data:
+    driver: local      # database, photos, accounts
+  templates:
+    driver: local      # one source workbook per project
