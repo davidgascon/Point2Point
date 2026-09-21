@@ -7,5 +7,4 @@ FROM nginx:1.27-alpine
 COPY nginx/default.conf /etc/nginx/conf.d/default.conf
 COPY web/ /srv/
 
-RUN nginx -t
 EXPOSE 8080
