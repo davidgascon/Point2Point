@@ -6,14 +6,29 @@ You have the stack running. Three things left, about 30 minutes.
 
 Push the latest files, then in Portainer: **Pull and redeploy**.
 
-Check the PocketBase log:
+**Delete the PocketBase volume first** — the failed migrations left partial
+state and there is no real data in there yet:
+
+```bash
+docker volume rm point2point_pb_data
+```
+
+Check the PocketBase log after it comes up:
 
 ```
 [indexes] users: ok
 [indexes] project_members: ok
 [fields] points.added_in_field: added
+[rules] projects: ok
+[rules] points: ok
+[rules] events: ok
+[rules] issues: ok
 Server started at http://0.0.0.0:8090
 ```
+
+Any line saying FAILED is not fatal — that collection stays at
+signed-in-users-only and you can set it in the dashboard. Everything else
+still starts.
 
 Then `curl http://localhost:8080/api/health` should return 200, not 502.
 

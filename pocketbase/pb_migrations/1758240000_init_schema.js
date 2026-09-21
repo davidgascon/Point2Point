@@ -3,6 +3,11 @@
 /**
  * Field Checkout — collections.
  *
+ * Access rules that reference another collection live in a later migration.
+ * PocketBase validates a rule when the collection is saved, so a rule naming
+ * `project_members` fails if that collection has not been created yet.
+ * Until the rules migration runs, every collection is signed-in-users-only.
+ *
  * Indexes live in the next migration on purpose. Creating them inline fails
  * on some PocketBase versions because the helper builds its SQL before the
  * new table's columns exist, and a failed index takes the whole migration
@@ -89,12 +94,12 @@ migrate(
         }),
       ],
       listRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= id && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       viewRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= id && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       createRule: "@request.auth.role = 'lead' || @request.auth.role = 'admin'",
       updateRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= id && @collection.project_members.user ?= @request.auth.id && @collection.project_members.role ?= 'lead'",
+        '@request.auth.id != ""',
       deleteRule: "@request.auth.role = 'admin'",
     });
     app.save(projects);
@@ -174,13 +179,13 @@ migrate(
         new TextField({ name: "notes", max: 2000 }),
       ],
       listRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       viewRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       createRule:
-        "@collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       updateRule:
-        "@collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       deleteRule: "@request.auth.role = 'admin'",
     });
     app.save(points);
@@ -218,11 +223,11 @@ migrate(
         new NumberField({ name: "at", required: true }),
       ],
       listRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       viewRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       createRule:
-        "@request.auth.id = by && @collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       // The audit trail is never edited or deleted, by anyone.
       updateRule: null,
       deleteRule: null,
@@ -289,13 +294,13 @@ migrate(
         new NumberField({ name: "resolved_at" }),
       ],
       listRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       viewRule:
-        "@request.auth.role = 'admin' || @collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       createRule:
-        "@collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       updateRule:
-        "@collection.project_members.project ?= project && @collection.project_members.user ?= @request.auth.id",
+        '@request.auth.id != ""',
       deleteRule: "@request.auth.role = 'admin'",
     });
     app.save(issues);
