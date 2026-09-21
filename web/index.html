@@ -376,6 +376,19 @@ section.blk{padding:16px;border-bottom:1px solid var(--edge)}
 </style>
 </head>
 <body>
+<script>
+window.addEventListener("error",function(e){
+  var d=document.getElementById("app");
+  if(!d||d.childElementCount)return;
+  d.innerHTML='<div style="padding:24px;font-family:system-ui;color:#EAF1F5">'+
+    '<h2 style="font-size:18px;margin-bottom:8px">The app failed to start</h2>'+
+    '<p style="color:#8AA0AD;font-size:14px;line-height:1.5">'+
+    (e.message||"Unknown error")+'<br><span style="color:#546874">'+
+    ((e.filename||"")+" line "+(e.lineno||"?"))+'</span></p>'+
+    '<p style="color:#546874;font-size:12.5px;margin-top:14px">'+
+    'Send this to whoever set the app up.</p></div>';
+},{once:true});
+</script>
 <div id="app"></div>
 <div id="print"></div>
 <script>
@@ -431,6 +444,184 @@ var SERVER_PROJECTS=[{"id":"kok","job":"86259065","name":"KOKUSAI","loc":"Hillsb
        return x.unit==="CHILLER"&&/PUMP|VLV/.test(x.tag)}).slice(0,15).map(function(x){return x.id})}
   ];
 })();
+
+/* ═══════════════════════════════════════════════════════════
+   SERVER ADAPTER — talks to PocketBase on the same origin.
+   Point ids stay small integers locally so the rest of the app is
+   unchanged; the PocketBase record id rides along as pt.pbId.
+   ═══════════════════════════════════════════════════════════ */
+var LIVE = (typeof PocketBase !== "undefined");
+var pb = LIVE ? new PocketBase(location.origin) : null;
+
+function pbErr(e){
+  var m=(e&&e.message)||String(e);
+  if(e&&e.response&&e.response.message)m=e.response.message;
+  if(/failed to fetch|networkerror/i.test(m))return "No connection to the server.";
+  return m;
+}
+function fileURL(rec,name){
+  try{
+    if(pb.files&&pb.files.getURL)return pb.files.getURL(rec,name,{thumb:"800x800"});
+    if(pb.files&&pb.files.getUrl)return pb.files.getUrl(rec,name,{thumb:"800x800"});
+  }catch(e){}
+  return location.origin+"/api/files/"+rec.collectionId+"/"+rec.id+"/"+name;
+}
+function mapPoint(rec,localId){
+  return{id:localId,pbId:rec.id,tag:rec.tag||"",type:rec.type||"-",
+    desc:rec.descr||"",addr:rec.addr||"",unit:rec.unit||"",sys:rec.controller||"",
+    rng:"",sheetRow:rec.sheet_row||null,
+    status:rec.status||null,by:rec.by||null,at:rec.at||null,
+    reading:rec.reading||null,checks:rec.checks||{},notes:rec.notes||"",
+    importedBy:rec.imported_by||"",installedBy:rec.installed_by||"",
+    p2pNA:!!rec.p2p_na,checksBy:null,checksAt:null,
+    addedInField:!!rec.added_in_field};
+}
+function mapIssue(rec,pointLocalId){
+  return{id:rec.id,scope:rec.scope,unit:rec.unit||"",kind:rec.kind||"Defect",
+    desc:rec.descr||"",party:rec.party||"Controls",priority:rec.priority||"Medium",
+    hours:rec.hours?String(rec.hours):"",blocks:!!rec.blocks,
+    photos:(rec.photos||[]).map(function(f){return fileURL(rec,f)}),
+    at:rec.at||Date.parse(rec.created)||Date.now(),by:rec.by||null,
+    resolved:!!rec.resolved,resolvedBy:rec.resolved_by||null,
+    resolvedAt:rec.resolved_at||null,_point:pointLocalId};
+}
+function pbLoadTechs(){
+  return pb.collection("users").getFullList({batch:200}).then(function(us){
+    var out={};
+    us.forEach(function(u){
+      out[u.id]={n:u.name||u.email,i:(u.initials||"").toUpperCase(),
+        email:u.email,role:u.role||"tech",active:u.active!==false,last:0};
+    });
+    return out;
+  });
+}
+function pbLoadProjects(){
+  return pb.collection("projects").getFullList({sort:"name"}).then(function(projs){
+    return Promise.all(projs.map(function(pr){
+      return Promise.all([
+        pb.collection("points").getFullList({filter:'project="'+pr.id+'"',batch:500}),
+        pb.collection("issues").getFullList({filter:'project="'+pr.id+'"',batch:200})
+      ]).then(function(r){
+        var pts=r[0],iss=r[1],n=0,byPb={};
+        var points=pts.map(function(rec){var p=mapPoint(rec,++n);byPb[rec.id]=p;return p});
+        // Preserve the workbook's own order so "sheet order" means something.
+        points.sort(function(a,b){return(a.sheetRow||0)-(b.sheetRow||0)});
+        var projIssues=[];
+        iss.forEach(function(rec){
+          if(rec.scope==="point"&&rec.point&&byPb[rec.point])
+            byPb[rec.point].issue=mapIssue(rec,byPb[rec.point].id);
+          else projIssues.push(mapIssue(rec,null));
+        });
+        return{id:pr.id,job:pr.job||"",name:pr.name,loc:pr.location||"",
+          points:points,issues:projIssues,
+          packages:((pr.settings||{}).packages)||[],
+          members:((pr.settings||{}).members)||[],_byPb:byPb};
+      });
+    }));
+  });
+}
+/* Events are the audit trail; the point record carries current state so a
+   fresh phone does not have to replay history. Both are written together. */
+function pbSendEvent(ev){
+  var p=S.projects.filter(function(x){return x.id===ev.projectId})[0];
+  if(!p)return Promise.resolve();
+  var pt=ev.pointId?p.points.filter(function(x){return x.id===ev.pointId})[0]:null;
+  var kindMap={verdict:"verdict",life:"life",checks:"checks",edit:"edit",
+    addpoint:"verdict",package:"issue",issue:"issue",resolve:"resolve"};
+  var rec={client_id:ev.id,project:ev.projectId,
+    point:(pt&&pt.pbId)?pt.pbId:null,
+    kind:kindMap[ev.kind||"verdict"]||"verdict",
+    payload:ev,by:S.user.id,at:ev.at};
+  return pb.collection("events").create(rec).catch(function(e){
+    // A duplicate client_id means the server already has it: not an error.
+    if(String(pbErr(e)).indexOf("client_id")>=0)return null;
+    throw e;
+  }).then(function(){return pbApplyServerSide(ev,p,pt)});
+}
+function pbApplyServerSide(ev,p,pt){
+  if(ev.kind==="issue"&&ev.issue)return pbSaveIssue(p,ev.issue);
+  if(ev.kind==="resolve")
+    return pb.collection("issues").update(ev.issueId,
+      {resolved:!!ev.resolved,resolved_by:ev.resolved?ev.by:null,
+       resolved_at:ev.resolved?ev.at:null});
+  if(ev.kind==="package")return pbSavePackages(p);
+  if(ev.kind==="addpoint"&&ev.point){
+    return pb.collection("points").create({
+      project:p.id,unit:ev.point.unit,tag:ev.point.tag,type:ev.point.type,
+      descr:ev.point.desc,addr:ev.point.addr,controller:ev.point.sys,
+      status:"",checks:{},notes:ev.point.notes,added_in_field:true
+    }).then(function(rec){
+      var local=p.points.filter(function(x){return x.id===ev.point.id})[0];
+      if(local)local.pbId=rec.id;
+    });
+  }
+  if(!pt||!pt.pbId)return Promise.resolve();
+  var patch={};
+  if(ev.kind==="edit"){patch[ev.field==="addr"?"addr":ev.field]=ev.value}
+  else if(ev.kind==="checks"){patch.checks=pt.checks}
+  else if(ev.kind==="life"){patch={status:ev.status||"",by:ev.by,at:ev.at}}
+  else{patch={status:ev.status,by:ev.by,at:ev.at,reading:ev.reading||null,
+              checks:pt.checks,notes:ev.notes||pt.notes||""}}
+  var q=pb.collection("points").update(pt.pbId,patch);
+  if(ev.issue)q=q.then(function(){return pbSaveIssue(p,ev.issue,pt)});
+  return q;
+}
+function pbSaveIssue(p,iss,pt){
+  var body={project:p.id,scope:iss.scope||(pt?"point":"unit"),
+    point:pt&&pt.pbId?pt.pbId:null,unit:iss.unit||(pt?pt.unit:""),
+    kind:iss.kind||"Defect",descr:iss.desc||"",party:iss.party||"Controls",
+    priority:iss.priority||"Medium",hours:parseFloat(iss.hours)||0,
+    blocks:!!iss.blocks,resolved:!!iss.resolved,by:iss.by||S.user.id,
+    at:iss.at||Date.now()};
+  var photos=(iss.photos||[]).filter(function(x){return/^data:/.test(x)});
+  // A PocketBase id is 15 chars; our locally generated ones are longer.
+  var existing=iss.pbId||(iss.id&&String(iss.id).length===15?iss.id:null);
+  var save=existing
+    ? pb.collection("issues").update(existing,body)
+    : pb.collection("issues").create(body);
+  return save.then(function(rec){
+    iss.pbId=rec.id;
+    if(!photos.length)return rec;
+    // Photos upload after the text so a slow image never holds up the record.
+    var fd=new FormData();
+    photos.forEach(function(d,i){
+      var bin=atob(d.split(",")[1]),arr=new Uint8Array(bin.length);
+      for(var k=0;k<bin.length;k++)arr[k]=bin.charCodeAt(k);
+      fd.append("photos",new Blob([arr],{type:"image/jpeg"}),"photo"+(i+1)+".jpg");
+    });
+    return pb.collection("issues").update(rec.id,fd);
+  });
+}
+function pbSavePackages(p){
+  return pb.collection("projects").update(p.id,
+    {settings:{packages:p.packages||[],members:p.members||[]}});
+}
+function pbSubscribe(){
+  if(!LIVE||!S.proj)return;
+  try{pb.collection("points").unsubscribe()}catch(e){}
+  pb.collection("points").subscribe("*",function(e){
+    var p=proj();if(!p||e.record.project!==p.id)return;
+    var local=p.points.filter(function(x){return x.pbId===e.record.id})[0];
+    if(!local){
+      if(e.action==="create"){
+        var np=mapPoint(e.record,p.points.reduce(function(a,x){return Math.max(a,x.id)},0)+1);
+        p.points.push(np);render();
+      }
+      return;
+    }
+    if(e.record.by===S.user.id)return;      // our own write echoing back
+    if(local.at&&e.record.at&&e.record.at<local.at)return;
+    var keep=local.issue;
+    var merged=mapPoint(e.record,local.id);
+    merged.issue=keep;
+    Object.keys(merged).forEach(function(k){local[k]=merged[k]});
+    S.fresh[local.id]=Date.now();
+    var who=TECHS[e.record.by];
+    if(who&&e.record.status)
+      toast(who.n.split(" ")[0]+" "+String(e.record.status).toLowerCase()+"ed "+local.tag);
+    else render();
+  }).catch(function(){});
+}
 
 /* ───────── storage: IndexedDB with a memory fallback ───────── */
 var DB=null, MEM={kv:{},queue:{}}, USE_MEM=false;
@@ -2831,5 +3022,6 @@ if(navigator.storage&&navigator.storage.persist){
   }).catch(function(){});
 }
 </script>
+
 </body>
 </html>

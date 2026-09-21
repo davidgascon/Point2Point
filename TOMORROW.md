@@ -18,7 +18,6 @@ Check the PocketBase log after it comes up:
 ```
 [indexes] users: ok
 [indexes] project_members: ok
-[fields] points.added_in_field: added
 [rules] projects: ok
 [rules] points: ok
 [rules] events: ok

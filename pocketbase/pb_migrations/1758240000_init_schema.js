@@ -3,19 +3,15 @@
 /**
  * Field Checkout — collections.
  *
- * Access rules that reference another collection live in a later migration.
- * PocketBase validates a rule when the collection is saved, so a rule naming
- * `project_members` fails if that collection has not been created yet.
- * Until the rules migration runs, every collection is signed-in-users-only.
+ * Fields are attached with `collection.fields.add(...)` after constructing the
+ * collection, never passed into `new Collection({ fields: [...] })`. The
+ * constructor form is silently ignored in this PocketBase version: the
+ * collection gets created with only its system columns, and every index and
+ * rule that follows then fails with "no such column".
  *
- * Indexes live in the next migration on purpose. Creating them inline fails
- * on some PocketBase versions because the helper builds its SQL before the
- * new table's columns exist, and a failed index takes the whole migration
- * down with it.
- *
- * Written against the PocketBase 0.23+ JS migration API (`migrate((app) => …)`).
- * If your pinned PB_VERSION is older than 0.23 the API is different
- * (`new Dao(db)`); see the README for how to check and what to do.
+ * Access rules that reference another collection live in a later migration,
+ * because PocketBase validates a rule when the collection is saved and the
+ * collection it names may not exist yet.
  *
  * Roles live on the user record:
  *   tech   — verifies points on projects they are a member of
@@ -24,285 +20,182 @@
  */
 migrate(
   (app) => {
+    const AUTHED = '@request.auth.id != ""';
+
     // ---------------------------------------------------------------- users
-    // PocketBase creates a `users` auth collection by default. We extend it
-    // rather than replace it, so password reset and email verification keep
-    // working out of the box.
+    // PocketBase ships a `users` auth collection. Extend it rather than
+    // replace it, so password reset and verification keep working.
     const users = app.findCollectionByNameOrId("users");
 
-    users.fields.add(
-      new TextField({
-        name: "initials",
-        required: true,
-        min: 1,
-        max: 4,
-        // These initials are what lands in the Point To Point column of the
-        // exported sheet, so they are part of the permanent record.
-        presentable: true,
-      })
-    );
-    users.fields.add(
-      new SelectField({
-        name: "role",
-        required: true,
-        maxSelect: 1,
-        values: ["tech", "lead", "admin"],
-      })
-    );
-    users.fields.add(new BoolField({ name: "active" }));
-    users.fields.add(new TextField({ name: "phone", max: 40 }));
+    if (!users.fields.getByName("initials")) {
+      // These initials land in the Point To Point column of the exported
+      // sheet, so they are part of the permanent record.
+      users.fields.add(
+        new TextField({ name: "initials", required: true, min: 1, max: 4, presentable: true })
+      );
+    }
+    if (!users.fields.getByName("role")) {
+      users.fields.add(
+        new SelectField({ name: "role", required: true, maxSelect: 1, values: ["tech", "lead", "admin"] })
+      );
+    }
+    if (!users.fields.getByName("active")) users.fields.add(new BoolField({ name: "active" }));
+    if (!users.fields.getByName("phone")) users.fields.add(new TextField({ name: "phone", max: 40 }));
 
-
-    // Nobody self-registers into the system; a lead or admin creates accounts.
-    users.createRule = null;
-    users.listRule = '@request.auth.id != ""';
-    users.viewRule = '@request.auth.id != ""';
+    users.listRule = AUTHED;
+    users.viewRule = AUTHED;
     users.updateRule = "id = @request.auth.id || @request.auth.role = 'admin'";
     users.deleteRule = "@request.auth.role = 'admin'";
-
     app.save(users);
 
     // ------------------------------------------------------------- projects
-    const projects = new Collection({
-      name: "projects",
-      type: "base",
-      fields: [
-        new TextField({ name: "name", required: true, max: 200, presentable: true }),
-        new TextField({ name: "job", max: 60 }),
-        new TextField({ name: "location", max: 300 }),
-        new SelectField({
-          name: "status",
-          maxSelect: 1,
-          values: ["active", "archived"],
-        }),
-        // The original workbook, kept so exports can be written back into it
-        // with all formatting and macros intact.
-        new FileField({
-          name: "template",
-          maxSelect: 1,
-          maxSize: 26214400,
-          mimeTypes: [
-            "application/vnd.ms-excel.sheet.macroEnabled.12",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          ],
-        }),
-        new JSONField({ name: "settings", maxSize: 200000 }),
-        new RelationField({
-          name: "created_by",
-          collectionId: users.id,
-          maxSelect: 1,
-        }),
+    const projects = new Collection({ name: "projects", type: "base" });
+    projects.fields.add(new TextField({ name: "name", required: true, max: 200, presentable: true }));
+    projects.fields.add(new TextField({ name: "job", max: 60 }));
+    projects.fields.add(new TextField({ name: "location", max: 300 }));
+    projects.fields.add(new SelectField({ name: "status", maxSelect: 1, values: ["active", "archived"] }));
+    // The original workbook, so exports can be written back into it with all
+    // formatting and macros intact.
+    projects.fields.add(new FileField({
+      name: "template", maxSelect: 1, maxSize: 26214400,
+      mimeTypes: [
+        "application/vnd.ms-excel.sheet.macroEnabled.12",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       ],
-      listRule:
-        '@request.auth.id != ""',
-      viewRule:
-        '@request.auth.id != ""',
-      createRule: "@request.auth.role = 'lead' || @request.auth.role = 'admin'",
-      updateRule:
-        '@request.auth.id != ""',
-      deleteRule: "@request.auth.role = 'admin'",
-    });
+    }));
+    projects.fields.add(new JSONField({ name: "settings", maxSize: 200000 }));
+    projects.fields.add(new RelationField({ name: "created_by", collectionId: users.id, maxSelect: 1 }));
+    projects.listRule = AUTHED;
+    projects.viewRule = AUTHED;
+    projects.createRule = "@request.auth.role = 'lead' || @request.auth.role = 'admin'";
+    projects.updateRule = AUTHED;
+    projects.deleteRule = "@request.auth.role = 'admin'";
     app.save(projects);
 
     // ------------------------------------------------------ project_members
-    const members = new Collection({
-      name: "project_members",
-      type: "base",
-      fields: [
-        new RelationField({
-          name: "project",
-          collectionId: projects.id,
-          required: true,
-          maxSelect: 1,
-          cascadeDelete: true,
-        }),
-        new RelationField({
-          name: "user",
-          collectionId: users.id,
-          required: true,
-          maxSelect: 1,
-          cascadeDelete: true,
-        }),
-        new SelectField({
-          name: "role",
-          required: true,
-          maxSelect: 1,
-          values: ["tech", "lead"],
-        }),
-        new RelationField({ name: "added_by", collectionId: users.id, maxSelect: 1 }),
-      ],
-      listRule: '@request.auth.id != ""',
-      viewRule: '@request.auth.id != ""',
-      createRule:
-        "@request.auth.role = 'lead' || @request.auth.role = 'admin'",
-      updateRule: "@request.auth.role = 'admin'",
-      deleteRule:
-        "@request.auth.role = 'lead' || @request.auth.role = 'admin'",
-    });
+    const members = new Collection({ name: "project_members", type: "base" });
+    members.fields.add(new RelationField({
+      name: "project", collectionId: projects.id, required: true, maxSelect: 1, cascadeDelete: true,
+    }));
+    members.fields.add(new RelationField({
+      name: "user", collectionId: users.id, required: true, maxSelect: 1, cascadeDelete: true,
+    }));
+    members.fields.add(new SelectField({
+      name: "role", required: true, maxSelect: 1, values: ["tech", "lead"],
+    }));
+    members.fields.add(new RelationField({ name: "added_by", collectionId: users.id, maxSelect: 1 }));
+    members.listRule = AUTHED;
+    members.viewRule = AUTHED;
+    members.createRule = "@request.auth.role = 'lead' || @request.auth.role = 'admin'";
+    members.updateRule = "@request.auth.role = 'admin'";
+    members.deleteRule = "@request.auth.role = 'lead' || @request.auth.role = 'admin'";
     app.save(members);
 
     // --------------------------------------------------------------- points
-    const points = new Collection({
-      name: "points",
-      type: "base",
-      fields: [
-        new RelationField({
-          name: "project",
-          collectionId: projects.id,
-          required: true,
-          maxSelect: 1,
-          cascadeDelete: true,
-        }),
-        new TextField({ name: "unit", max: 120 }),
-        new TextField({ name: "tag", required: true, max: 200, presentable: true }),
-        new TextField({ name: "type", max: 10 }),
-        new TextField({ name: "descr", max: 400 }),
-        new TextField({ name: "addr", max: 80 }),
-        new TextField({ name: "controller", max: 200 }),
-        // Row in the source workbook, so an export lands on the right line
-        // even if a tag was edited in the field.
-        new NumberField({ name: "sheet_row" }),
-        new SelectField({
-          name: "status",
-          maxSelect: 1,
-          values: ["Installed", "Wired", "Pass", "Fail", "Issue"],
-        }),
-        new RelationField({ name: "by", collectionId: users.id, maxSelect: 1 }),
-        new NumberField({ name: "at" }),
-        // Verbatim sign-off text imported from the sheet ("DG 9/4/26"),
-        // preserved so historic entries are never rewritten.
-        new TextField({ name: "imported_by", max: 60 }),
-        new TextField({ name: "installed_by", max: 60 }),
-        new BoolField({ name: "p2p_na" }),
-        new JSONField({ name: "checks", maxSize: 4000 }),
-        new JSONField({ name: "reading", maxSize: 4000 }),
-        new TextField({ name: "notes", max: 2000 }),
-      ],
-      listRule:
-        '@request.auth.id != ""',
-      viewRule:
-        '@request.auth.id != ""',
-      createRule:
-        '@request.auth.id != ""',
-      updateRule:
-        '@request.auth.id != ""',
-      deleteRule: "@request.auth.role = 'admin'",
-    });
+    const points = new Collection({ name: "points", type: "base" });
+    points.fields.add(new RelationField({
+      name: "project", collectionId: projects.id, required: true, maxSelect: 1, cascadeDelete: true,
+    }));
+    points.fields.add(new TextField({ name: "unit", max: 120 }));
+    points.fields.add(new TextField({ name: "tag", required: true, max: 200, presentable: true }));
+    points.fields.add(new TextField({ name: "type", max: 10 }));
+    points.fields.add(new TextField({ name: "descr", max: 400 }));
+    points.fields.add(new TextField({ name: "addr", max: 80 }));
+    points.fields.add(new TextField({ name: "controller", max: 200 }));
+    // Row in the source workbook, so an export lands on the right line even
+    // if a tag was corrected in the field.
+    points.fields.add(new NumberField({ name: "sheet_row" }));
+    points.fields.add(new SelectField({
+      name: "status", maxSelect: 1, values: ["Installed", "Wired", "Pass", "Fail", "Issue"],
+    }));
+    points.fields.add(new RelationField({ name: "by", collectionId: users.id, maxSelect: 1 }));
+    points.fields.add(new NumberField({ name: "at" }));
+    // Verbatim sign-off text imported from the sheet ("DG 9/4/26"), preserved
+    // so historic entries are never rewritten.
+    points.fields.add(new TextField({ name: "imported_by", max: 60 }));
+    points.fields.add(new TextField({ name: "installed_by", max: 60 }));
+    points.fields.add(new BoolField({ name: "p2p_na" }));
+    // Points a tech created at the panel; they have no row in the workbook.
+    points.fields.add(new BoolField({ name: "added_in_field" }));
+    points.fields.add(new JSONField({ name: "checks", maxSize: 4000 }));
+    points.fields.add(new JSONField({ name: "reading", maxSize: 4000 }));
+    points.fields.add(new TextField({ name: "notes", max: 2000 }));
+    points.listRule = AUTHED;
+    points.viewRule = AUTHED;
+    points.createRule = AUTHED;
+    points.updateRule = AUTHED;
+    points.deleteRule = "@request.auth.role = 'admin'";
     app.save(points);
 
     // --------------------------------------------------------------- events
-    // Append-only. A point's current state is the most recent event; the
-    // phone generates the id so a retried sync is a no-op rather than a
-    // duplicate.
-    const events = new Collection({
-      name: "events",
-      type: "base",
-      fields: [
-        new TextField({ name: "client_id", required: true, max: 60 }),
-        new RelationField({
-          name: "project",
-          collectionId: projects.id,
-          required: true,
-          maxSelect: 1,
-          cascadeDelete: true,
-        }),
-        new RelationField({
-          name: "point",
-          collectionId: points.id,
-          maxSelect: 1,
-          cascadeDelete: true,
-        }),
-        new SelectField({
-          name: "kind",
-          required: true,
-          maxSelect: 1,
-          values: ["verdict", "life", "checks", "edit", "issue", "resolve"],
-        }),
-        new JSONField({ name: "payload", maxSize: 20000 }),
-        new RelationField({ name: "by", collectionId: users.id, maxSelect: 1 }),
-        new NumberField({ name: "at", required: true }),
-      ],
-      listRule:
-        '@request.auth.id != ""',
-      viewRule:
-        '@request.auth.id != ""',
-      createRule:
-        '@request.auth.id != ""',
-      // The audit trail is never edited or deleted, by anyone.
-      updateRule: null,
-      deleteRule: null,
-    });
+    // Append-only. A point's current state is the most recent event; the phone
+    // generates client_id so a retried sync is a no-op, not a duplicate.
+    const events = new Collection({ name: "events", type: "base" });
+    events.fields.add(new TextField({ name: "client_id", required: true, max: 60 }));
+    events.fields.add(new RelationField({
+      name: "project", collectionId: projects.id, required: true, maxSelect: 1, cascadeDelete: true,
+    }));
+    events.fields.add(new RelationField({
+      name: "point", collectionId: points.id, maxSelect: 1, cascadeDelete: true,
+    }));
+    events.fields.add(new SelectField({
+      name: "kind", required: true, maxSelect: 1,
+      values: ["verdict", "life", "checks", "edit", "issue", "resolve"],
+    }));
+    events.fields.add(new JSONField({ name: "payload", maxSize: 20000 }));
+    events.fields.add(new RelationField({ name: "by", collectionId: users.id, maxSelect: 1 }));
+    events.fields.add(new NumberField({ name: "at", required: true }));
+    events.listRule = AUTHED;
+    events.viewRule = AUTHED;
+    events.createRule = AUTHED;
+    // The audit trail is never edited or deleted, by anyone.
+    events.updateRule = null;
+    events.deleteRule = null;
     app.save(events);
 
     // --------------------------------------------------------------- issues
-    const issues = new Collection({
-      name: "issues",
-      type: "base",
-      fields: [
-        new RelationField({
-          name: "project",
-          collectionId: projects.id,
-          required: true,
-          maxSelect: 1,
-          cascadeDelete: true,
-        }),
-        new SelectField({
-          name: "scope",
-          required: true,
-          maxSelect: 1,
-          values: ["point", "unit", "job"],
-        }),
-        new RelationField({
-          name: "point",
-          collectionId: points.id,
-          maxSelect: 1,
-          cascadeDelete: true,
-        }),
-        new TextField({ name: "unit", max: 120 }),
-        new SelectField({
-          name: "kind",
-          required: true,
-          maxSelect: 1,
-          values: ["Defect", "Rework", "RFI", "Observation"],
-        }),
-        new TextField({ name: "descr", required: true, max: 4000 }),
-        new SelectField({
-          name: "party",
-          maxSelect: 1,
-          values: ["Controls", "Electrical", "Mechanical", "TAB", "Engineering", "Other"],
-        }),
-        new SelectField({
-          name: "priority",
-          maxSelect: 1,
-          values: ["Low", "Medium", "High"],
-        }),
-        new NumberField({ name: "hours" }),
-        new BoolField({ name: "blocks" }),
-        // Photos go here, not through the event queue — a dozen images must
-        // never hold up a sync of text records.
-        new FileField({
-          name: "photos",
-          maxSelect: 12,
-          maxSize: 8388608,
-          mimeTypes: ["image/jpeg", "image/png", "image/webp"],
-          thumbs: ["120x120", "800x800"],
-        }),
-        new BoolField({ name: "resolved" }),
-        new RelationField({ name: "by", collectionId: users.id, maxSelect: 1 }),
-        new RelationField({ name: "resolved_by", collectionId: users.id, maxSelect: 1 }),
-        new NumberField({ name: "at" }),
-        new NumberField({ name: "resolved_at" }),
-      ],
-      listRule:
-        '@request.auth.id != ""',
-      viewRule:
-        '@request.auth.id != ""',
-      createRule:
-        '@request.auth.id != ""',
-      updateRule:
-        '@request.auth.id != ""',
-      deleteRule: "@request.auth.role = 'admin'",
-    });
+    const issues = new Collection({ name: "issues", type: "base" });
+    issues.fields.add(new RelationField({
+      name: "project", collectionId: projects.id, required: true, maxSelect: 1, cascadeDelete: true,
+    }));
+    issues.fields.add(new SelectField({
+      name: "scope", required: true, maxSelect: 1, values: ["point", "unit", "job"],
+    }));
+    issues.fields.add(new RelationField({
+      name: "point", collectionId: points.id, maxSelect: 1, cascadeDelete: true,
+    }));
+    issues.fields.add(new TextField({ name: "unit", max: 120 }));
+    issues.fields.add(new SelectField({
+      name: "kind", required: true, maxSelect: 1,
+      values: ["Defect", "Rework", "RFI", "Observation"],
+    }));
+    issues.fields.add(new TextField({ name: "descr", required: true, max: 4000 }));
+    issues.fields.add(new SelectField({
+      name: "party", maxSelect: 1,
+      values: ["Controls", "Electrical", "Mechanical", "TAB", "Engineering", "Other"],
+    }));
+    issues.fields.add(new SelectField({
+      name: "priority", maxSelect: 1, values: ["Low", "Medium", "High"],
+    }));
+    issues.fields.add(new NumberField({ name: "hours" }));
+    issues.fields.add(new BoolField({ name: "blocks" }));
+    // Photos live here, not in the event queue — a dozen images must never
+    // hold up a sync of text records.
+    issues.fields.add(new FileField({
+      name: "photos", maxSelect: 12, maxSize: 8388608,
+      mimeTypes: ["image/jpeg", "image/png", "image/webp"],
+      thumbs: ["120x120", "800x800"],
+    }));
+    issues.fields.add(new BoolField({ name: "resolved" }));
+    issues.fields.add(new RelationField({ name: "by", collectionId: users.id, maxSelect: 1 }));
+    issues.fields.add(new RelationField({ name: "resolved_by", collectionId: users.id, maxSelect: 1 }));
+    issues.fields.add(new NumberField({ name: "at" }));
+    issues.fields.add(new NumberField({ name: "resolved_at" }));
+    issues.listRule = AUTHED;
+    issues.viewRule = AUTHED;
+    issues.createRule = AUTHED;
+    issues.updateRule = AUTHED;
+    issues.deleteRule = "@request.auth.role = 'admin'";
     app.save(issues);
   },
 
@@ -315,15 +208,12 @@ migrate(
         /* already gone */
       }
     });
-
-    const users = app.findCollectionByNameOrId("users");
-    ["initials", "role", "active", "phone"].forEach((f) => {
-      try {
-        users.fields.removeByName(f);
-      } catch (e) {
-        /* not present */
-      }
-    });
-    app.save(users);
+    try {
+      const users = app.findCollectionByNameOrId("users");
+      ["initials", "role", "active", "phone"].forEach((f) => {
+        try { users.fields.removeByName(f); } catch (e) {}
+      });
+      app.save(users);
+    } catch (e) {}
   }
 );
