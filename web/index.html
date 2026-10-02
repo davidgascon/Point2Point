@@ -315,10 +315,11 @@ section.blk{padding:16px;border-bottom:1px solid var(--edge)}
 
 .dock{position:sticky;bottom:0;z-index:20;background:var(--panel);border-top:1px solid var(--edge);
   padding:11px 14px calc(11px + env(safe-area-inset-bottom, 0px));box-shadow:0 -8px 24px var(--shadow)}
-.verdicts{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:8px}
-.vb{min-height:60px;border-radius:13px;font-weight:700;font-size:16px;color:#0B1013;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}
-.vb small{font-size:10.5px;font-weight:600;opacity:.62;letter-spacing:.03em}
+.verdicts{display:grid;grid-template-columns:1fr 1fr 1.15fr 1.15fr;gap:6px}
+.vb{min-height:62px;border-radius:12px;font-weight:700;font-size:15px;color:#0B1013;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  padding:0 2px;text-align:center}
+.vb small{font-size:9px;font-weight:700;opacity:.6;letter-spacing:.02em;line-height:1.15}
 .vb:active{transform:translateY(1px)}
 .docknav{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px;
   font-size:12.5px;color:var(--dim);gap:8px}
@@ -682,7 +683,7 @@ var S={screen:"signin",user:null,proj:null,unit:null,q:"",filter:"open",idx:0,
   sort:"sheet",pkg:null,pkgFilter:"mine",loadErr:null,
   authMode:"signin",authErr:null,authOk:null,authEmail:"",suName:"",suInit:"",suEmail:"",
   prefs:{openLife:false,openReading:false,openChecks:true,openNotes:false,
-         afterVerdict:"list",tolAI:"2",tolAO:"3"}};
+         tolAI:"2",tolAO:"3"}};
 var LIFE=["Installed","Wired"],VERDICT=["Pass","Fail","Issue"];
 var CHECKS=["Trends","Alarm","Graphic","Startup"];
 var CKLAB={Trends:"Trend / history",Alarm:"Alarm",Graphic:"Graphic",Startup:"Startup date"};
@@ -1076,6 +1077,47 @@ function breakdown(pts){
   ];
 }
 
+/* ═══════ browser / phone back button ═══════
+   The app is one page, so without this the hardware back button and the
+   iOS swipe-back gesture leave the app entirely. Techs hit that constantly.
+   Each navigable state pushes a history entry; going back restores it. */
+var NAV_DEPTH=0, NAV_LOCK=false, NAV_LAST=null;
+function navKey(){
+  return [S.screen,S.proj,S.unit,S.pkg,S.filter,S.idx,
+          S.modal&&S.modal.kind,S.selecting].join("|");
+}
+function navSnapshot(){
+  return{screen:S.screen,proj:S.proj,unit:S.unit,pkg:S.pkg,filter:S.filter,
+    idx:S.idx,sort:S.sort,limit:S.limit,modal:S.modal,selecting:S.selecting,
+    sel:S.sel,_prev:S._prev,q:S.q,defFilter:S.defFilter,pkgFilter:S.pkgFilter};
+}
+function navRestore(s){
+  Object.keys(s).forEach(function(k){S[k]=s[k]});
+  if(S.screen==="verify")loadDraft();
+}
+function navSync(){
+  if(NAV_LOCK||!S.user)return;
+  var k=navKey();
+  if(k===NAV_LAST)return;
+  NAV_LAST=k;
+  try{history.pushState(navSnapshot(),"");NAV_DEPTH++}catch(e){}
+}
+/* In-app back arrows go through history too, otherwise the two drift apart
+   and the phone button starts replaying screens you already left. */
+function goBack(fallback){
+  if(NAV_DEPTH>0){history.back();return}
+  if(fallback)fallback();
+}
+window.addEventListener("popstate",function(e){
+  if(!e.state)return;
+  NAV_LOCK=true;
+  if(NAV_DEPTH>0)NAV_DEPTH--;
+  navRestore(e.state);
+  NAV_LAST=navKey();
+  render();
+  NAV_LOCK=false;
+});
+
 /* ───────── views ───────── */
 function render(){
   document.documentElement.setAttribute("data-theme",S.theme==="day"?"day":"night");
@@ -1086,6 +1128,7 @@ function render(){
   h+=vModal();
   if(S.toast)h+='<div class="toast">'+esc(S.toast)+'</div>';
   el("app").innerHTML=h;bind();
+  navSync();
 }
 function planeBtn(){return'<button class="iconbtn'+(S.simOffline?" armed":"")+'" id="plane" '+
   'aria-pressed="'+S.simOffline+'" aria-label="Simulate losing signal">✈</button>'}
@@ -1470,12 +1513,13 @@ function vVerify(){
     '<button id="prev"'+(S.idx===0?" disabled":"")+'>‹ Back</button>'+
     '<span>'+esc(S.user.i)+'</span>'+
     '<button id="skip"'+(S.idx>=list.length-1?" disabled":"")+'>Skip ›</button></div><div class="verdicts">'+
-    VERDICT.map(function(v){
-      var sub=S.prefs.afterVerdict==="next"
-        ? {Pass:"AND NEXT",Fail:"LOGS DEFECT",Issue:"LOGS DEFECT"}[v]
-        : {Pass:"AND CLOSE",Fail:"LOGS DEFECT",Issue:"LOGS DEFECT"}[v];
-      return'<button class="vb" data-v="'+v+'" style="background:'+col(v)+'">'+v+
-        '<small>'+sub+'</small></button>'}).join("")+
+    [["Issue","Issue","LOGS DEFECT",""],
+     ["Fail","Fail","LOGS DEFECT",""],
+     ["Pass","Pass","AND CLOSE",""],
+     ["Pass","Pass","AND NEXT","1"]].map(function(b){
+      return'<button class="vb" data-v="'+b[0]+'" data-adv="'+b[3]+'" '+
+        'style="background:'+col(b[0])+'">'+b[1]+'<small>'+b[2]+'</small></button>'
+    }).join("")+
     '</div></div>';
   return h;
 }
@@ -2378,10 +2422,7 @@ function vDevice(){
         '<button class="tgl" data-pref="'+o[0]+'" aria-pressed="'+(!!S.prefs[o[0]])+'" '+
         'aria-label="'+o[1]+' open by default"><i></i></button></div>'
     }).join("")+
-    '<div class="switch"><div><div class="lab">Go to next point after a verdict</div>'+
-    '<div class="hint">Off means Pass/Fail/Issue returns to the point list</div></div>'+
-    '<button class="tgl" data-pref="afterVerdict" aria-pressed="'+(S.prefs.afterVerdict==="next")+'" '+
-    'aria-label="Advance after verdict"><i></i></button></div></div>';
+    '</div>';
   h+='<div class="card"><h3>Default tolerance</h3>'+
     '<div class="two" style="margin-top:8px">'+
     '<div><div style="font-size:12px;color:var(--dim);margin-bottom:6px">Analog inputs ±</div>'+
@@ -2441,7 +2482,7 @@ function loadDraft(){
           checks:S.prefs.openChecks,notes:S.prefs.openNotes});
   S.takeover=null;
 }
-function commit(v){
+function commit(v,advance){
   var pt=queue()[S.idx];
   if(v==="Fail"||v==="Issue"){
     var ex=pt.issue&&!pt.issue.resolved?pt.issue:null;
@@ -2453,10 +2494,11 @@ function commit(v){
       blocks:!!(ex&&ex.blocks),photos:(ex&&ex.photos)?ex.photos.slice():[]};
     render();return;
   }
-  doCommit(v,null);
+  doCommit(v,null,advance);
 }
-function doCommit(v,issue){
+function doCommit(v,issue,advance){
   var pt=queue()[S.idx],d=S.draft;
+  var wasId=pt.id;
   var ev={id:uid(),projectId:S.proj,pointId:pt.id,tag:pt.tag,unit:pt.unit,status:v,
     by:S.user.id,at:Date.now(),
     reading:isAnalog(pt.type)?{kind:"analog",found:d.found,bas:d.bas,tol:d.tol}
@@ -2467,10 +2509,16 @@ function doCommit(v,issue){
   qAdd(ev);kvSet("projects",S.projects);
   var msg=online()?(v==="Pass"?"Passed "+pt.tag:v+" logged on "+pt.tag)
                   :"Saved on this phone — "+pt.tag;
-  if(S.prefs.afterVerdict==="next"){
+  if(advance){
     var list=queue();
     if(list.length){
-      if(S.idx>=list.length)S.idx=list.length-1;
+      // If the point is still in this filter (e.g. viewing "All") step past it.
+      // If the verdict removed it (viewing "To do") the same index is already
+      // the next point, so leave the index alone.
+      var still=-1;
+      for(var i=0;i<list.length;i++)if(list[i].id===wasId){still=i;break}
+      if(still>=0)S.idx=Math.min(still+1,list.length-1);
+      else if(S.idx>=list.length)S.idx=list.length-1;
       loadDraft();toast(msg);flush();return;
     }
   }
@@ -2506,7 +2554,7 @@ function bind(){
   on("tgl","click",function(){togglePlane()});
   on("thm","click",function(){S.theme=S.theme==="day"?"night":"day";render()});
   on("gear","click",function(){if(S.screen!=="device"){S._prev=S.screen;S.screen="device";render()}});
-  on("back3","click",function(){S.screen=S._prev||"projects";render()});
+  on("back3","click",function(){goBack(function(){S.screen=S._prev||"projects";render()})});
 
   /* ---- auth ---- */
   function signInAs(k){
@@ -2613,8 +2661,8 @@ function bind(){
 
   /* ---- menu and rollout screens ---- */
   on("tomore","click",function(){S.screen="more";render()});
-  on("backmore","click",function(){S.screen="projects";render()});
-  on("backmore2","click",function(){S.screen="more";render()});
+  on("backmore","click",function(){goBack(function(){S.screen="projects";render()})});
+  on("backmore2","click",function(){goBack(function(){S.screen="more";render()})});
   all("[data-go]",function(b){b.addEventListener("click",function(){
     var d=b.dataset.go;
     if(d==="device"){S._prev="more";S.screen="device"}else S.screen=d;
@@ -2697,17 +2745,22 @@ function bind(){
     var f=el("q");if(f){f.focus();try{f.setSelectionRange(pos,pos)}catch(_){}}
   });
   on("back","click",function(){
-    if(S.screen==="points"){
-      if(S.pkg){S.pkg=null;S.screen=(S._prev==="work")?"work":"units"}
-      else{S.screen="units";S.unit=null}
-    }else S.screen="projects";
-    render();
+    goBack(function(){
+      if(S.screen==="points"){
+        if(S.pkg){S.pkg=null;S.screen=(S._prev==="work")?"work":"units"}
+        else{S.screen="units";S.unit=null}
+      }else S.screen="projects";
+      render();
+    });
   });
   on("chg","click",function(){S.screen="units";S.unit=null;S.q="";S.selecting=false;S.sel={};render()});
   on("chg2","click",function(){S.screen="units";S.unit=null;S.q="";render()});
   on("back2","click",function(){
-    if(S._prev==="issues"){S._prev="points";S.screen="issues"}else S.screen="points";
-    render()});
+    goBack(function(){
+      if(S._prev==="issues"){S._prev="points";S.screen="issues"}else S.screen="points";
+      render();
+    });
+  });
 
   all(".chip",function(b){b.addEventListener("click",function(){S.filter=b.dataset.f;S.limit=60;render()})});
   all(".pt",function(b){b.addEventListener("click",function(){
@@ -2725,7 +2778,7 @@ function bind(){
   all("[data-bkp]",function(b){b.addEventListener("click",function(){
     var k="p:"+b.dataset.bkp;S.open[k]=!S.open[k];render()})});
   on("toprojset","click",function(){S.screen="projset";render()});
-  on("back5","click",function(){S.screen="units";render()});
+  on("back5","click",function(){goBack(function(){S.screen="units";render()})});
   on("pssave","click",function(){
     var p=proj();
     p.name=(el("psn").value||"").trim()||p.name;
@@ -2776,7 +2829,7 @@ function bind(){
     S.printOpts[b.dataset.po]=b.dataset.pv;render()})});
   on("pnotes","click",function(){S.printOpts.notes=!S.printOpts.notes;render()});
   on("pgo","click",doPrint);
-  on("back4","click",function(){S.screen="units";render()});
+  on("back4","click",function(){goBack(function(){S.screen="units";render()})});
   all("[data-df]",function(b){b.addEventListener("click",function(){S.defFilter=b.dataset.df;render()})});
   on("deffil","click",function(){S.modal={kind:"deffilter"};render()});
   all("[data-dk]",function(b){b.addEventListener("click",function(){S.defKind=b.dataset.dk;render()})});
@@ -2946,8 +2999,10 @@ function bind(){
     applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
     S.modal=null;toast("Issue logged");flush();
   });
-  on("mcancel","click",function(){S.modal=null;render()});
-  on("ovl","click",function(e){if(e.target&&e.target.id==="ovl"){S.modal=null;render()}});
+  on("mcancel","click",function(){goBack(function(){S.modal=null;render()})});
+  on("ovl","click",function(e){
+    if(e.target&&e.target.id==="ovl")goBack(function(){S.modal=null;render()});
+  });
   on("mdesc","input",function(e){S.modal.desc=e.target.value});
   all("[data-mp]",function(b){b.addEventListener("click",function(){
     S.modal.party=b.dataset.mp;var d=el("mdesc");if(d)S.modal.desc=d.value;render()})});
@@ -2962,7 +3017,7 @@ function bind(){
     S.modal=null;
     doCommit(v,{desc:m.desc.trim(),party:m.party,priority:m.priority,
       kind:m.ikind||"Defect",hours:m.hours||"",blocks:!!m.blocks,
-      photos:(m.photos||[]).slice(),scope:"point"});
+      photos:(m.photos||[]).slice(),scope:"point"},false);
   });
 
   on("sel","click",function(){S.selecting=true;S.sel={};render()});
@@ -3022,8 +3077,7 @@ function bind(){
   })});
   all("[data-pref]",function(b){b.addEventListener("click",function(){
     var k=b.dataset.pref;
-    if(k==="afterVerdict")S.prefs.afterVerdict=S.prefs.afterVerdict==="next"?"list":"next";
-    else S.prefs[k]=!S.prefs[k];
+    S.prefs[k]=!S.prefs[k];
     kvSet("prefs",S.prefs);render();
   })});
   ["tolAI","tolAO"].forEach(function(id){on(id,"input",function(e){
@@ -3062,7 +3116,8 @@ function bind(){
     S.sort=b.dataset.so;S.limit=60;S.modal=null;render()})});
   on("prev","click",function(){if(S.idx>0){S.idx--;loadDraft();render()}});
   on("skip","click",function(){if(S.idx<queue().length-1){S.idx++;loadDraft();render()}});
-  all("[data-v]",function(b){b.addEventListener("click",function(){commit(b.dataset.v)})});
+  all("[data-v]",function(b){b.addEventListener("click",function(){
+    commit(b.dataset.v, b.dataset.adv==="1")})});
 }
 
 /* ───────── boot ───────── */
@@ -3114,6 +3169,8 @@ kvGet("dataVersion").then(function(v){
   return kvSet("projects",S.projects);
 }).then(function(){render();flush()})
   .catch(function(){S.projects=freshCopy();render()});
+
+try{history.replaceState(navSnapshot(),"")}catch(e){}
 
 setInterval(function(){flush()},FLUSH_EVERY);
 setInterval(function(){coworkerTick();liveTick()},COWORKER_EVERY);
