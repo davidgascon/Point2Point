@@ -213,6 +213,10 @@ input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);
 .pkgbar b{font-weight:600}
 .newbadge{font-size:10px;font-weight:700;color:var(--wired);border:1px solid var(--wired);
   border-radius:5px;padding:1px 5px;margin-left:6px;vertical-align:middle;letter-spacing:.03em}
+.delbadge{font-size:10px;font-weight:700;color:var(--fail);border:1px solid var(--fail);
+  border-radius:5px;padding:1px 5px;margin-left:6px;vertical-align:middle;letter-spacing:.03em}
+.pt.gone .tag{text-decoration:line-through;opacity:.55}
+.pt.gone .desc{opacity:.5}
 .pkgbar button{margin-left:auto;font-size:12.5px;color:var(--accent);font-weight:600;
   padding:7px 10px;border-radius:9px;border:1px solid var(--edge);min-height:36px}
 section.blk{padding:16px;border-bottom:1px solid var(--edge)}
@@ -484,7 +488,9 @@ function mapPoint(rec,localId){
     reading:rec.reading||null,checks:rec.checks||{},notes:rec.notes||"",
     importedBy:rec.imported_by||"",installedBy:rec.installed_by||"",
     p2pNA:!!rec.p2p_na,checksBy:null,checksAt:null,
-    addedInField:!!rec.added_in_field};
+    addedInField:!!rec.added_in_field,
+    deleted:!!rec.deleted,deletedBy:rec.deleted_by||null,
+    deletedAt:rec.deleted_at||null,deleteReason:rec.delete_reason||""};
 }
 function mapIssue(rec,pointLocalId){
   return{id:rec.id,scope:rec.scope,unit:rec.unit||"",kind:rec.kind||"Defect",
@@ -538,7 +544,7 @@ function pbSendEvent(ev){
   var p=S.projects.filter(function(x){return x.id===ev.projectId})[0];
   if(!p)return Promise.resolve();
   var pt=ev.pointId?p.points.filter(function(x){return x.id===ev.pointId})[0]:null;
-  var kindMap={verdict:"verdict",life:"life",checks:"checks",edit:"edit",
+  var kindMap={verdict:"verdict",life:"life",checks:"checks",edit:"edit",delete:"edit",
     addpoint:"verdict",package:"issue",issue:"issue",resolve:"resolve"};
   var rec={client_id:ev.id,project:ev.projectId,
     point:(pt&&pt.pbId)?pt.pbId:null,
@@ -569,7 +575,13 @@ function pbApplyServerSide(ev,p,pt){
   }
   if(!pt||!pt.pbId)return Promise.resolve();
   var patch={};
-  if(ev.kind==="edit"){patch[ev.field==="addr"?"addr":ev.field]=ev.value}
+  if(ev.kind==="delete"){
+    patch={deleted:!!ev.deleted,
+      deleted_by:ev.deleted?ev.by:null,
+      deleted_at:ev.deleted?ev.at:null,
+      delete_reason:ev.deleted?(ev.reason||""):""};
+  }
+  else if(ev.kind==="edit"){patch[ev.field==="addr"?"addr":ev.field]=ev.value}
   else if(ev.kind==="checks"){patch.checks=pt.checks}
   else if(ev.kind==="life"){patch={status:ev.status||"",by:ev.by,at:ev.at}}
   else{patch={status:ev.status,by:ev.by,at:ev.at,reading:ev.reading||null,
@@ -729,6 +741,16 @@ function exportRows(p){
              sheet_row:pt.sheetRow||null,
              added:!!pt.addedInField,type:pt.type||"",descr:pt.desc||"",
              addr:pt.addr||"",controller:pt.sys||""};
+    if(pt.deleted){
+      // The row still exists in the workbook, so say what happened to it
+      // instead of leaving a blank that reads as outstanding work.
+      row.p2p="DELETED";
+      row.installed=pt.installedBy||"";
+      row.notes=("DELETED "+shortDate(pt.deletedAt)+
+        (TECHS[pt.deletedBy]?" by "+TECHS[pt.deletedBy].i:"")+
+        (pt.deleteReason?" - "+pt.deleteReason:"")).slice(0,500);
+      return row;
+    }
     row.installed=pt.installedBy||"";
     if(pt.status==="Pass")row.p2p=stamp(pt.by,pt.at)||pt.importedBy||"";
     else if(pt.status==="Fail"||pt.status==="Issue")row.p2p="DNP";
@@ -828,6 +850,13 @@ function applyEvent(ev,projects){
   }
   var pt=p.points.filter(function(x){return x.id===ev.pointId})[0];
   if(!pt)return null;
+  if(ev.kind==="delete"){
+    pt.deleted=!!ev.deleted;
+    pt.deletedBy=ev.deleted?ev.by:null;
+    pt.deletedAt=ev.deleted?ev.at:null;
+    pt.deleteReason=ev.deleted?(ev.reason||""):"";
+    return pt;
+  }
   if(ev.kind==="edit"){pt[ev.field]=ev.value;return pt}
   if(ev.kind==="life"){
     if(["Pass","Fail","Issue"].indexOf(pt.status)>=0)return pt;   // never downgrade
@@ -932,6 +961,7 @@ function claimsNow(){
 
 /* ───────── derived ───────── */
 function stats(list){
+  list=list.filter(function(x){return!x.deleted});
   var z={total:list.length,Pass:0,Fail:0,Issue:0,Wired:0,Installed:0,NA:0};
   list.forEach(function(x){
     if(x.p2pNA&&["Pass","Fail","Issue"].indexOf(x.status)<0){z.NA++;return}
@@ -984,9 +1014,9 @@ function sortPts(list){
 }
 function queue(){
   var l=unitPts();
-  if(S.filter==="open")l=l.filter(function(x){return["Pass","Fail","Issue"].indexOf(x.status)<0});
-  else if(S.filter==="flag")l=l.filter(function(x){return x.status==="Fail"||x.status==="Issue"});
-  else if(S.filter==="pass")l=l.filter(function(x){return x.status==="Pass"});
+  if(S.filter==="open")l=l.filter(function(x){return!x.deleted&&["Pass","Fail","Issue"].indexOf(x.status)<0});
+  else if(S.filter==="flag")l=l.filter(function(x){return!x.deleted&&(x.status==="Fail"||x.status==="Issue")});
+  else if(S.filter==="pass")l=l.filter(function(x){return!x.deleted&&x.status==="Pass"});
   return sortPts(l);
 }
 function railOf(list){
@@ -1387,11 +1417,12 @@ function vPoints(){
     var on=!!S.sel[pt.id];
     var done=CHECKS.map(function(c){var v=ckState(pt.checks,c);
       return v==="done"?c:(v==="na"?c+" n/a":null)}).filter(Boolean);
-    h+='<button class="pt'+(isNew?" fresh":"")+'" data-i="'+pt.id+'">'+
+    h+='<button class="pt'+(isNew?" fresh":"")+(pt.deleted?" gone":"")+'" data-i="'+pt.id+'">'+
       (S.selecting
         ?'<span class="selbox'+(on?" on":"")+'">'+(on?"✓":"")+'</span>'
         :'<span class="stat" style="'+(ring?"background:none;box-shadow:inset 0 0 0 2px "+col(pt.status):"background:"+col(pt.status))+'"></span>')+
       '<span class="grow"><span class="tag mono">'+esc(pt.tag)+'</span>'+
+      (pt.deleted?'<span class="delbadge">DELETED</span>':'')+
       (pt.addedInField?'<span class="newbadge">ADDED</span>':'')+
       (qHas(pt.id)?'<span class="qbadge">ON PHONE</span>':'')+
       '<div class="desc">'+(pt.addr?'<span class="adr">'+esc(pt.addr)+'</span> · ':'')+esc(pt.desc)+'</div>'+
@@ -1472,6 +1503,14 @@ function vVerify(){
     '<input id="vaddr" value="'+esc(pt.addr)+'" placeholder="0.5.2" '+
     'autocapitalize="characters" autocomplete="off" spellcheck="false" aria-label="I/O address"/>'+
     '<span class="ed">tap to edit</span></div></div>';
+  if(pt.deleted)
+    h+='<div class="takeover" style="background:rgba(244,82,77,.12);border-color:var(--fail)">'+
+      '<b>This point is deleted.</b> '+esc(pt.deleteReason||"No reason recorded")+
+      '<div style="font-size:12px;color:var(--dim);margin-top:4px">'+
+      (TECHS[pt.deletedBy]?esc(TECHS[pt.deletedBy].n):"-")+
+      (pt.deletedAt?" . "+new Date(pt.deletedAt).toLocaleDateString():"")+
+      ' . it still exports, marked DELETED</div>'+
+      '<button class="ghost" id="undelete" style="margin-top:10px">Restore this point</button></div>';
   if(S.takeover)h+='<div class="takeover">'+esc(S.takeover)+'. Your entry records on top of theirs — both are kept.</div>';
 
   h+=disc("life","Before checkout",
@@ -1526,6 +1565,11 @@ function vVerify(){
     }).join("")+'</div>'+
     '<div style="font-size:12px;color:var(--faint);margin-top:9px">Tap once for done, again for not applicable, again to clear.</div>');
 
+  if(!pt.deleted&&isLead())
+    h+='<button class="disc" id="delpoint" style="color:var(--fail)">'+
+      '<span class="grow"><span class="t" style="color:var(--fail)">Delete this point</span>'+
+      '<div class="s" style="color:var(--dim)">Not on the job - stays on the sheet, marked DELETED</div>'+
+      '</span><span class="chev">›</span></button>';
   h+=disc("notes","Notes",
     d.notes?esc(d.notes):'<span style="color:var(--faint)">None</span>',
     '<textarea id="nt" rows="3" placeholder="Anything the next person needs to know">'+esc(d.notes)+'</textarea>');
@@ -1656,6 +1700,20 @@ function vModal(){
       '<button id="ires" style="background:'+(it.resolved?"var(--edge)":"var(--pass)")+
       ';color:'+(it.resolved?"var(--text)":"#0B1013")+'">'+
       (it.resolved?"Reopen":"Mark resolved")+'</button></div></div></div>';
+  }
+  if(m.kind==="delpoint"){
+    return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
+      '<h2>Delete this point</h2>'+
+      '<div class="sh"><span class="mono">'+esc(m.tag)+'</span> - it stays in the record and '+
+      'exports as <span class="mono">DELETED</span>, so the sheet still accounts for the row.</div>'+
+      '<div class="lb">Why is it being deleted</div>'+
+      '<textarea id="delwhy" rows="3" placeholder="Device never installed / removed from scope / duplicate row"></textarea>'+
+      '<div style="font-size:12px;color:var(--faint);margin-top:10px;line-height:1.55">'+
+      'It leaves the To do, Flagged and Verified lists and stops counting toward '+
+      'the percentage. You can restore it later.</div>'+
+      '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button>'+
+      '<button id="delgo" style="background:var(--fail);color:#0B1013">Delete point</button></div>'+
+      '</div></div>';
   }
   if(m.kind==="addwhat"){
     return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
@@ -3177,6 +3235,28 @@ function bind(){
       field:"addr",value:v,by:S.user.id,at:Date.now()};
     applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
     toast("Address saved as "+(v||"blank"));flush();
+  });
+  on("delpoint","click",function(){
+    var pt=queue()[S.idx];if(!pt)return;
+    S.modal={kind:"delpoint",pointId:pt.id,tag:pt.tag};render();
+  });
+  function setDeleted(pt,on,reason){
+    var ev={id:uid(),kind:"delete",projectId:S.proj,pointId:pt.id,tag:pt.tag,
+      unit:pt.unit,deleted:on,reason:reason||"",by:S.user.id,at:Date.now()};
+    applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);flush();
+  }
+  on("delgo","click",function(){
+    var m=S.modal,why=(el("delwhy")?el("delwhy").value:"").trim();
+    if(!why){toast("Say why - the sheet will show this");return}
+    var pt=proj().points.filter(function(x){return x.id===m.pointId})[0];
+    if(!pt)return;
+    setDeleted(pt,true,why);
+    S.modal=null;S.screen="points";toast(pt.tag+" deleted");render();
+  });
+  on("undelete","click",function(){
+    var pt=queue()[S.idx];if(!pt)return;
+    setDeleted(pt,false,"");
+    loadDraft();toast(pt.tag+" restored");render();
   });
   on("sortbtn","click",function(){S.modal={kind:"sort"};render()});
   all("[data-so]",function(b){b.addEventListener("click",function(){
