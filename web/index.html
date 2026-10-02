@@ -176,10 +176,15 @@ input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);
 .more{width:100%;padding:15px;font-size:13.5px;color:var(--accent);font-weight:600;
   border-top:1px solid var(--edge)}
 
-.vhead{padding:16px 16px 14px;border-bottom:1px solid var(--edge)}
-.vtag{font-size:24px;font-weight:600;letter-spacing:-.02em;word-break:break-all;line-height:1.15}
-.vdesc{font-size:15px;margin-top:5px}
-.meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+.vhead{padding:0 16px 14px;border-bottom:1px solid var(--edge)}
+/* --barh is measured after each render; the top bar grows with the notch and
+   with the preview-frame offset, so a fixed value would be wrong somewhere. */
+.vpin{position:sticky;top:var(--barh,56px);z-index:18;background:var(--ink);
+  padding:14px 16px 11px;border-bottom:1px solid var(--edge)}
+.vtag{font-size:22px;font-weight:600;letter-spacing:-.02em;word-break:break-all;line-height:1.15}
+.vdesc{font-size:14.5px;margin-top:4px;color:var(--dim);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.meta{display:flex;flex-wrap:wrap;gap:6px;padding-top:12px}
 .addrow{display:flex;align-items:center;gap:10px;margin-top:12px;
   border:1px solid var(--edge);border-radius:11px;padding:9px 11px;background:var(--panel)}
 .addrow .al{font-size:11px;color:var(--dim);font-weight:600;letter-spacing:.04em;flex:none}
@@ -1082,6 +1087,18 @@ function breakdown(pts){
    iOS swipe-back gesture leave the app entirely. Techs hit that constantly.
    Each navigable state pushes a history entry; going back restores it. */
 var NAV_DEPTH=0, NAV_LOCK=false, NAV_LAST=null;
+
+/* Offline readiness. Each of these is a thing that silently breaks offline
+   mode, and none of them are visible to a tech unless we show them. */
+var OFF={installed:false,sw:false,persisted:false};
+OFF.installed = window.navigator.standalone===true ||
+  (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+if("serviceWorker" in navigator){
+  OFF.sw = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.ready.then(function(){OFF.sw=true}).catch(function(){});
+}
+if(navigator.storage && navigator.storage.persisted)
+  navigator.storage.persisted().then(function(p){OFF.persisted=p}).catch(function(){});
 function navKey(){
   return [S.screen,S.proj,S.unit,S.pkg,S.filter,S.idx,
           S.modal&&S.modal.kind,S.selecting].join("|");
@@ -1128,12 +1145,15 @@ function render(){
   h+=vModal();
   if(S.toast)h+='<div class="toast">'+esc(S.toast)+'</div>';
   el("app").innerHTML=h;bind();
+  var bar=document.querySelector(".bar");
+  if(bar)document.documentElement.style.setProperty("--barh",bar.offsetHeight+"px");
   navSync();
 }
 function planeBtn(){return'<button class="iconbtn'+(S.simOffline?" armed":"")+'" id="plane" '+
   'aria-pressed="'+S.simOffline+'" aria-label="Simulate losing signal">✈</button>'}
 function themeBtn(){return'<button class="iconbtn" id="thm" aria-label="Night or daylight">'+(S.theme==="day"?"☾":"☀")+'</button>'}
 function gearBtn(){return'<button class="iconbtn" id="gear" aria-label="This device">⚙</button>'}
+function helpBtn(){return'<button class="iconbtn" id="tohelp" aria-label="Help">?</button>'}
 function strip(){
   var led,t;
   if(!online()){led="var(--issue)";t=S.queue.length
@@ -1265,7 +1285,7 @@ function vUnits(){
   });
   var h='<div class="bar"><button class="iconbtn" id="back" aria-label="Back">‹</button>'+
     '<h1>'+esc(p.name)+'<span class="sub">'+z.done+' of '+z.total+' points verified</span></h1>'+
-    planeBtn()+themeBtn()+gearBtn()+'</div>'+strip();
+    planeBtn()+helpBtn()+themeBtn()+gearBtn()+'</div>'+strip();
   h+='<div class="finder"><input id="q" type="search" inputmode="search" autocomplete="off" '+
     'placeholder="Which unit are you at? AHU-03, VAV 2-15…" value="'+esc(S.q)+'"/></div>';
   var nOpen=p.points.filter(function(x){return x.issue&&!x.issue.resolved}).length;
@@ -1315,7 +1335,7 @@ function vPoints(){
        '<h1>'+nSel+' selected<span class="sub">tap points to add or remove</span></h1>'
       :'<button class="iconbtn" id="back" aria-label="Back">‹</button>'+
        '<h1>'+esc(S.unit||p.name)+'<span class="sub">'+z.done+'/'+z.total+' verified</span></h1>'+
-       planeBtn()+themeBtn()+gearBtn())+
+       planeBtn()+helpBtn()+themeBtn()+gearBtn())+
     '</div>'+strip();
   if(S.pkg){
     var pk=packages(p).filter(function(k){return k.id===S.pkg})[0];
@@ -1437,9 +1457,10 @@ function vVerify(){
   var ana=isAnalog(pt.type);
   var h='<div class="bar"><button class="iconbtn" id="back2" aria-label="Back">‹</button>'+
     '<h1>'+esc(pt.unit)+'<span class="sub">Point '+(S.idx+1)+' of '+list.length+'</span></h1>'+
-    planeBtn()+themeBtn()+gearBtn()+'</div>'+strip();
-  h+='<div class="vhead"><div class="vtag mono">'+esc(pt.tag)+'</div>'+
-    '<div class="vdesc">'+esc(pt.desc)+'</div><div class="meta">'+
+    planeBtn()+helpBtn()+themeBtn()+gearBtn()+'</div>'+strip();
+  h+='<div class="vpin"><div class="vtag mono">'+esc(pt.tag)+'</div>'+
+    '<div class="vdesc">'+esc(pt.desc)+'</div></div>'+
+    '<div class="vhead"><div class="meta">'+
     '<span class="pill type" style="background:'+(TYPEC[pt.type]||"var(--edge)")+'">'+pt.type+'</span>'+
     (pt.rng?'<span class="pill">'+esc(pt.rng)+'</span>':'')+
     (pt.addedInField?'<span class="pill" style="color:var(--wired);border-color:var(--wired)">'+
@@ -2249,29 +2270,72 @@ function vAccount(){
   h+='<button class="ghost danger" id="signout">Sign out</button>';
   return h+'</div>';
 }
+function okRow(good,label,detail){
+  return'<div class="kv" style="align-items:flex-start"><span style="color:var(--text);'+
+    'display:flex;align-items:center;gap:9px"><span class="led" style="background:'+
+    (good?"var(--pass)":"var(--issue)")+'"></span>'+label+'</span>'+
+    '<span style="font-weight:400;color:'+(good?"var(--pass)":"var(--issue)")+';max-width:52%">'+
+    (good?"Ready":detail)+'</span></div>';
+}
 function vHowto(){
-  var h='<div class="bar"><button class="iconbtn" id="backmore2" aria-label="Back">‹</button>'+
-    '<h1>How to use this</h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+  var p=S.projects.length, q=S.queue.length;
+  var h='<div class="bar"><button class="iconbtn" id="backhelp" aria-label="Back">‹</button>'+
+    '<h1>Help<span class="sub">offline setup and how to work</span></h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+
+  // --- the part that actually matters ---
+  var ready = OFF.installed && OFF.sw && p>0;
+  h+='<div class="card" style="border-color:'+(ready?"var(--pass)":"var(--issue)")+'">'+
+    '<h3>Will this work with no signal?</h3>'+
+    '<div style="font-size:15px;font-weight:600;margin:4px 0 10px;color:'+
+    (ready?"var(--pass)":"var(--issue)")+'">'+
+    (ready?"Yes — this phone is ready":"Not yet — see below")+'</div>'+
+    okRow(OFF.installed,"Added to home screen","Still in Safari — tap Share, Add to Home Screen") +
+    okRow(OFF.sw,"App saved on this phone","Open it once with signal") +
+    okRow(p>0,"Job list downloaded", p>0?"":"Open your project while you have signal") +
+    okRow(OFF.persisted,"Storage protected","iPhone may clear it after a week unused") +
+    '<div style="font-size:11.5px;color:var(--faint);margin-top:11px;line-height:1.6">'+
+    'All four green means you can work a whole day with no bars. '+
+    (q?'<br><b style="color:var(--issue)">'+q+' change'+(q===1?"":"s")+' still on this phone.</b>':'')+
+    '</div></div>';
+
+  h+='<div class="card"><h3>Setting up a phone — do this once</h3>'+
+    '<ol style="margin:10px 0 0 18px;font-size:13.5px;line-height:1.85">'+
+    '<li>Open the site in <b>Safari</b> (not Chrome)</li>'+
+    '<li>Tap the <b>Share</b> button — the square with the arrow</li>'+
+    '<li>Scroll down, tap <b>Add to Home Screen</b>, then <b>Add</b></li>'+
+    '<li><b>Open it from the new icon</b>, not from Safari</li>'+
+    '<li>Sign in, then open your project once while you have signal</li>'+
+    '</ol>'+
+    '<div class="warn" style="margin:12px 0 0">'+
+    '<b>Step 4 is the one people skip</b>'+
+    'A Safari tab and the installed app keep separate storage on iPhone. '+
+    'Work you do in the tab will not be in the app, and will not sync. '+
+    'If you are unsure, check the first card above — it says which one you are in.'+
+    '</div></div>';
+
+  h+='<div class="card"><h3>Working with no signal</h3>'+
+    '<div style="font-size:13.5px;line-height:1.7">'+
+    'Open the project in the truck while you still have bars. That pulls every '+
+    'point onto the phone.<br><br>'+
+    'In the mech room, keep working normally. The bar at the top turns amber and '+
+    'counts what is waiting. Nothing is lost.<br><br>'+
+    '<b>When you get signal back, open the app.</b> iPhones run nothing in the '+
+    'background, so it only sends while the app is open and on screen. '+
+    'Do not end the day with an amber bar — stay on wifi until it goes green.'+
+    '</div></div>';
+
   var secs=[
-    ["Install it first","On iPhone: open the site in Safari, tap Share, then Add to Home Screen, then open it from the icon. "+
-      "This matters more than it sounds — a Safari tab and the installed app keep separate storage, so work done in the tab will not be there when you open the app."],
-    ["Load the job in the truck","Open the project while you have signal. That pulls the whole point list onto the phone. "+
-      "After that it works with no bars."],
-    ["Walk up to a unit","Search the unit tag — type 03 to find AHU-03. Tap it and you get its points, already filtered to what is left."],
-    ["Verify a point","Big tag at the top, I/O address under it. Enter the reading at the device and the reading on the BAS; "+
-      "it tells you in words whether you are in tolerance. Then Pass, Fail or Issue at the bottom."],
-    ["Fail and Issue ask for a note","That is deliberate. A failure with no description is a defect nobody can close. "+
-      "Say what is wrong and who has to fix it."],
-    ["Mass edit the checkboxes","Tap Select on a point list, choose the points, then mark Trend, Alarm, Graphic or Startup "+
-      "in one pass. Use Mark N/A when a check does not apply."],
-    ["Log what is not a point","The + button covers a whole unit or the whole job — a drawing error, a missing part, an RFI. "+
-      "If it is rework caused by someone else, put the hours in. That is how it gets billed."],
-    ["No signal is fine","Your work saves on the phone and the bar at the top counts what is waiting. "+
-      "Open the app once you are back in signal and it sends. Do not end the day with an amber bar."]
+    ["Find your unit","Search the unit tag — type 03 to find AHU-03. Tap it and you get its points, already filtered to what is left."],
+    ["Verify a point","Tag and I/O address at the top. Enter the reading at the device and the reading on the BAS; it tells you in words whether you are in tolerance. Then Issue, Fail, Pass and close, or Pass and next at the bottom."],
+    ["Pass and next","Moves straight to the next point in whatever order you are sorted by — so sort by I/O address and you can work down the terminal strip."],
+    ["Fail and Issue ask for a note","Deliberate. A failure with no description is a defect nobody can close. Say what is wrong and who has to fix it."],
+    ["Mass edit the checks","Tap Select on a point list, pick the points, then mark Trend, Alarm, Graphic or Startup in one pass. Use Mark N/A when a check does not apply."],
+    ["Log what is not a point","The + button covers a whole unit or the whole job — a drawing error, a missing part, an RFI. If it is rework caused by someone else, put the hours in. That is how it gets billed."],
+    ["Going back","The phone back button and the swipe-back gesture both work. Backing out of a point before a verdict records nothing."]
   ];
-  secs.forEach(function(s,i){
-    h+='<div class="card"><h3>'+(i+1)+'. '+esc(s[0])+'</h3>'+
-      '<div style="font-size:13.5px;line-height:1.65;margin-top:7px">'+esc(s[1])+'</div></div>';
+  secs.forEach(function(s){
+    h+='<div class="card"><h3>'+esc(s[0])+'</h3>'+
+      '<div style="font-size:13.5px;line-height:1.7;margin-top:6px">'+esc(s[1])+'</div></div>';
   });
   h+='<button class="ghost" id="printhow">Print this as a one-pager</button>';
   return h+'</div>';
@@ -2661,6 +2725,9 @@ function bind(){
 
   /* ---- menu and rollout screens ---- */
   on("tomore","click",function(){S.screen="more";render()});
+  on("tohelp","click",function(){S._helpFrom=S.screen;S.screen="howto";render()});
+  on("backhelp","click",function(){
+    goBack(function(){S.screen=S._helpFrom||"projects";render()})});
   on("backmore","click",function(){goBack(function(){S.screen="projects";render()})});
   on("backmore2","click",function(){goBack(function(){S.screen="more";render()})});
   all("[data-go]",function(b){b.addEventListener("click",function(){
