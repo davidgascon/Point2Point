@@ -1116,7 +1116,7 @@ function breakdown(pts){
    The app is one page, so without this the hardware back button and the
    iOS swipe-back gesture leave the app entirely. Techs hit that constantly.
    Each navigable state pushes a history entry; going back restores it. */
-var NAV_DEPTH=0, NAV_LOCK=false, NAV_LAST=null;
+var NAV_DEPTH=0, NAV_LOCK=false, NAV_LAST=null, NAV_PAGE=null;
 
 /* Offline readiness. Each of these is a thing that silently breaks offline
    mode, and none of them are visible to a tech unless we show them. */
@@ -1133,6 +1133,14 @@ function navKey(){
   return [S.screen,S.proj,S.unit,S.pkg,S.filter,S.idx,
           S.modal&&S.modal.kind,S.selecting].join("|");
 }
+/* Same key without the point index. Moving between points with Skip or
+   Pass-and-next is not a new page: if each one pushed an entry, back would
+   walk you backwards through every point you just did instead of out to the
+   list. Those replace the current entry instead. */
+function navPageKey(){
+  return [S.screen,S.proj,S.unit,S.pkg,S.filter,
+          S.modal&&S.modal.kind,S.selecting].join("|");
+}
 function navSnapshot(){
   return{screen:S.screen,proj:S.proj,unit:S.unit,pkg:S.pkg,filter:S.filter,
     idx:S.idx,sort:S.sort,limit:S.limit,modal:S.modal,selecting:S.selecting,
@@ -1144,10 +1152,18 @@ function navRestore(s){
 }
 function navSync(){
   if(NAV_LOCK||!S.user)return;
-  var k=navKey();
+  var k=navKey(), pk=navPageKey();
   if(k===NAV_LAST)return;
   NAV_LAST=k;
-  try{history.pushState(navSnapshot(),"");NAV_DEPTH++}catch(e){}
+  try{
+    if(pk===NAV_PAGE){
+      history.replaceState(navSnapshot(),"");      // same page, moved along it
+    }else{
+      history.pushState(navSnapshot(),"");
+      NAV_DEPTH++;
+      NAV_PAGE=pk;
+    }
+  }catch(e){}
 }
 /* In-app back arrows go through history too, otherwise the two drift apart
    and the phone button starts replaying screens you already left. */
@@ -1161,6 +1177,7 @@ window.addEventListener("popstate",function(e){
   if(NAV_DEPTH>0)NAV_DEPTH--;
   navRestore(e.state);
   NAV_LAST=navKey();
+  NAV_PAGE=navPageKey();
   render();
   NAV_LOCK=false;
 });
@@ -3317,7 +3334,7 @@ kvGet("dataVersion").then(function(v){
 }).then(function(){render();flush()})
   .catch(function(){S.projects=freshCopy();render()});
 
-try{history.replaceState(navSnapshot(),"")}catch(e){}
+try{history.replaceState(navSnapshot(),"");NAV_PAGE=navPageKey()}catch(e){}
 
 setInterval(function(){flush()},FLUSH_EVERY);
 setInterval(function(){coworkerTick();liveTick()},COWORKER_EVERY);
