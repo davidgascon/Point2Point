@@ -500,10 +500,12 @@ function pbLoadTechs(){
   });
 }
 function pbLoadProjects(){
-  return pb.collection("projects").getFullList({requestKey:null,sort:"name"}).then(function(projs){
+  return pb.collection("projects").getFullList({requestKey:null,batch:200})
+    .then(function(projs){
+    projs.sort(function(a,b){return String(a.name||"").localeCompare(String(b.name||""))});
     return Promise.all(projs.map(function(pr){
       return Promise.all([
-        pb.collection("points").getFullList({requestKey:null,filter:'project="'+pr.id+'"',batch:500}),
+        pb.collection("points").getFullList({requestKey:null,filter:'project="'+pr.id+'"',batch:200}),
         pb.collection("issues").getFullList({requestKey:null,filter:'project="'+pr.id+'"',batch:200})
       ]).then(function(r){
         var pts=r[0],iss=r[1],n=0,byPb={};
@@ -677,7 +679,7 @@ var S={screen:"signin",user:null,proj:null,unit:null,q:"",filter:"open",idx:0,
   open:{},selecting:false,sel:{},massMode:"mark",massChecks:{Trends:true,Alarm:true,Graphic:true},
   modal:null,defFilter:"open",defParty:"any",defPrio:"any",defKind:"any",defScope:"any",
   printOpts:{status:"open",prio:"any",party:"any",unit:"any",kind:"any",notes:true},
-  sort:"sheet",pkg:null,pkgFilter:"mine",
+  sort:"sheet",pkg:null,pkgFilter:"mine",loadErr:null,
   authMode:"signin",authErr:null,authOk:null,authEmail:"",suName:"",suInit:"",suEmail:"",
   prefs:{openLife:false,openReading:false,openChecks:true,openNotes:false,
          afterVerdict:"list",tolAI:"2",tolAO:"3"}};
@@ -1160,6 +1162,10 @@ function vProjects(){
     planeBtn()+themeBtn()+
     '<button class="iconbtn" id="tomore" aria-label="Menu">☰</button></div>'+strip()+'<div class="body">';
   if(!S.projects.length){
+    if(S.loadErr)
+      h+='<div class="warn" style="margin:0 0 12px"><b>The server refused the request</b>'+
+         esc(S.loadErr)+'<br><span style="color:var(--dim);font-size:12px">'+
+         'Your data may still be on the server — this is a read problem, not a lost import.</span></div>';
     h+='<div class="emptyish"><b>Nothing on this phone yet</b>'+
       'Load your projects while you have signal. After that the app works with no bars.</div>'+
       '<button class="big" id="pull"'+(online()?"":" disabled")+'>'+
@@ -2410,7 +2416,11 @@ function pull(){
     }).then(function(){
       pbSubscribe();
       if(!S.toast)toast("Up to date");
-    }).catch(function(e){toast(pbErr(e))});
+    }).catch(function(e){
+      S.loadErr=pbErr(e)||"Could not load projects from the server.";
+      toast("Could not load: "+S.loadErr);
+      render();
+    });
   }
   if(!online()){toast("No signal");return Promise.resolve()}
   var fresh=JSON.parse(JSON.stringify(SERVER_PROJECTS));
