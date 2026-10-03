@@ -308,6 +308,8 @@ section.blk{padding:16px;border-bottom:1px solid var(--edge)}
 .phgrid{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .phgrid .ph{position:relative}
 .phgrid img{width:74px;height:74px;object-fit:cover;border-radius:9px;border:1px solid var(--edge)}
+.phgrid .phkb{position:absolute;bottom:3px;left:3px;font-size:9px;font-weight:700;
+  background:rgba(0,0,0,.6);color:#fff;border-radius:4px;padding:1px 4px;letter-spacing:.02em}
 .phgrid .rm{position:absolute;top:-6px;right:-6px;width:24px;height:24px;border-radius:50%;
   background:var(--fail);color:#0B1013;font-weight:700;font-size:14px;display:grid;place-items:center}
 .addph{width:74px;height:74px;border-radius:9px;border:1px dashed var(--edge);
@@ -606,14 +608,25 @@ function pbSaveIssue(p,iss,pt){
   return save.then(function(rec){
     iss.pbId=rec.id;
     if(!photos.length)return rec;
+    // The text record is already saved at this point. If the images fail —
+    // too large for a proxy, flaky signal — keep the defect and flag the
+    // photos rather than failing the whole event and blocking the queue.
     // Photos upload after the text so a slow image never holds up the record.
-    var fd=new FormData();
-    photos.forEach(function(d,i){
-      var bin=atob(d.split(",")[1]),arr=new Uint8Array(bin.length);
-      for(var k=0;k<bin.length;k++)arr[k]=bin.charCodeAt(k);
-      fd.append("photos",new Blob([arr],{type:"image/jpeg"}),"photo"+(i+1)+".jpg");
-    });
-    return pb.collection("issues").update(rec.id,fd,{requestKey:null});
+    // One request per photo. Sending four at once makes a single body big
+    // enough to hit a proxy limit, and then all four fail together.
+    return photos.reduce(function(chain,d,i){
+      return chain.then(function(){
+        var bin=atob(d.split(",")[1]),arr=new Uint8Array(bin.length);
+        for(var k=0;k<bin.length;k++)arr[k]=bin.charCodeAt(k);
+        var fd=new FormData();
+        fd.append("photos+",new Blob([arr],{type:"image/jpeg"}),"photo"+(i+1)+".jpg");
+        return pb.collection("issues").update(rec.id,fd,{requestKey:null})
+          .catch(function(e){
+            iss.photoError=pbErr(e);
+            console.log("[photos] "+(i+1)+" of "+photos.length+" failed: "+pbErr(e));
+          });
+      });
+    },Promise.resolve()).then(function(){return rec});
   });
 }
 function pbSavePackages(p){
@@ -712,16 +725,50 @@ var IKHINT={Defect:"Built per drawings, does not work",
   Observation:"Worth recording, nobody is blocked"};
 function kindColor(k){return{Defect:"var(--fail)",Rework:"var(--issue)",
   RFI:"var(--wired)",Observation:"var(--dim)"}[k]||"var(--dim)"}
+/* A modern iPhone photo is 3-6 MB. Nothing in this app needs that: a defect
+   photo has to show a wire landing or a nameplate, which 1000px covers. We
+   aim for a byte target rather than a fixed quality, because a photo of a dim
+   mech room and a photo of a sunlit roof compress very differently. */
+var PHOTO_MAX_DIM=1000, PHOTO_TARGET=260*1024, PHOTO_FLOOR=0.32;
+function dataUrlBytes(d){
+  var i=d.indexOf(",")+1;
+  return Math.round((d.length-i)*3/4);   // base64 -> bytes
+}
 function shrinkPhoto(file,cb){
   var fr=new FileReader();
   fr.onload=function(){
     var img=new Image();
     img.onload=function(){
-      var max=1200,w=img.width,hh=img.height;
-      if(w>max||hh>max){var s=max/Math.max(w,hh);w=Math.round(w*s);hh=Math.round(hh*s)}
-      var cv=document.createElement("canvas");cv.width=w;cv.height=hh;
-      cv.getContext("2d").drawImage(img,0,0,w,hh);
-      try{cb(cv.toDataURL("image/jpeg",0.62))}catch(e){cb(null)}
+      function render(maxDim){
+        var w=img.width,hh=img.height;
+        if(w>maxDim||hh>maxDim){
+          var s=maxDim/Math.max(w,hh);
+          w=Math.round(w*s);hh=Math.round(hh*s);
+        }
+        var cv=document.createElement("canvas");
+        cv.width=w;cv.height=hh;
+        var ctx=cv.getContext("2d");
+        ctx.fillStyle="#fff";ctx.fillRect(0,0,w,hh);   // no black edges on PNGs
+        ctx.drawImage(img,0,0,w,hh);
+        return cv;
+      }
+      try{
+        var dim=PHOTO_MAX_DIM, out=null;
+        // Step the quality down, then the dimensions, until it fits.
+        for(var pass=0;pass<2&&!out;pass++){
+          var cv=render(dim);
+          var qualities=[0.7,0.6,0.5,0.42,PHOTO_FLOOR];
+          for(var i=0;i<qualities.length;i++){
+            var d=cv.toDataURL("image/jpeg",qualities[i]);
+            if(dataUrlBytes(d)<=PHOTO_TARGET||i===qualities.length-1){
+              if(dataUrlBytes(d)<=PHOTO_TARGET){out=d;break}
+              if(pass===1){out=d;break}   // second pass: take what we have
+            }
+          }
+          dim=Math.round(dim*0.7);        // still too big, shrink and retry
+        }
+        cb(out);
+      }catch(e){cb(null)}
     };
     img.onerror=function(){cb(null)};
     img.src=fr.result;
@@ -886,29 +933,52 @@ function applyEvent(ev,projects){
 var SIM={events:[],claims:{}};
 function pushEvents(evs){
   if(LIVE){
-    // Sequential on purpose: order matters for the audit trail, and a phone
-    // coming back from a dead zone should not open 40 sockets at once.
+    // Sequential, because order matters for the audit trail and a phone coming
+    // back from a dead zone should not open forty sockets at once. But each
+    // event is caught on its own: one that will not send must never hold up
+    // the ones behind it, which is how a failed photo used to strand a day of
+    // verifications.
+    var done=[],failed=[];
     return evs.reduce(function(chain,ev){
-      return chain.then(function(){return pbSendEvent(ev)});
-    },Promise.resolve());
+      return chain.then(function(){
+        return pbSendEvent(ev).then(function(){done.push(ev.id)})
+          .catch(function(e){failed.push({ev:ev,msg:pbErr(e)})});
+      });
+    },Promise.resolve()).then(function(){return{done:done,failed:failed}});
   }
   return new Promise(function(res,rej){
     setTimeout(function(){
       if(!online())return rej();
       evs.forEach(function(e){if(!SIM.events.some(function(x){return x.id===e.id}))SIM.events.push(e)});
-      res();
+      res({done:evs.map(function(e){return e.id}),failed:[]});
     },650);
   });
 }
 function flush(){
-  if(S.syncing||!S.queue.length||!online())return Promise.resolve();
+  if(S.syncing||!online())return Promise.resolve();
+  // Anything that has failed repeatedly is parked: it stays on the phone and
+  // visible in Settings, but it stops blocking everything queued behind it.
+  var batch=S.queue.filter(function(e){return!e._stuck});
+  if(!batch.length)return Promise.resolve();
   S.syncing=true;render();
-  var batch=S.queue.slice();
-  return pushEvents(batch).then(function(){
-    return Promise.all(batch.map(function(e){return qDel(e.id)}));
-  }).then(function(){
-    S.queue=S.queue.filter(function(e){return!batch.some(function(b){return b.id===e.id})});
-    S.lastSync=Date.now();S.syncing=false;render();
+  return pushEvents(batch).then(function(r){
+    return Promise.all(r.done.map(function(id){return qDel(id)})).then(function(){
+      S.queue=S.queue.filter(function(e){return r.done.indexOf(e.id)<0});
+      r.failed.forEach(function(f){
+        var ev=S.queue.filter(function(e){return e.id===f.ev.id})[0];
+        if(!ev)return;
+        ev._tries=(ev._tries||0)+1;
+        ev._err=f.msg;
+        if(ev._tries>=3)ev._stuck=true;   // park it, keep the line moving
+        qAdd(ev);
+      });
+      if(r.done.length)S.lastSync=Date.now();
+      S.syncing=false;
+      var stuck=S.queue.filter(function(e){return e._stuck}).length;
+      if(stuck&&r.failed.length)
+        toast(stuck+" item"+(stuck===1?"":"s")+" will not send — see Settings");
+      else render();
+    });
   }).catch(function(){S.syncing=false;render()});
 }
 var LIVE_SEEN=0;
@@ -1116,7 +1186,7 @@ function breakdown(pts){
    The app is one page, so without this the hardware back button and the
    iOS swipe-back gesture leave the app entirely. Techs hit that constantly.
    Each navigable state pushes a history entry; going back restores it. */
-var NAV_DEPTH=0, NAV_LOCK=false, NAV_LAST=null, NAV_PAGE=null;
+var NAV_DEPTH=0, NAV_LOCK=false, NAV_LAST=null, NAV_PAGE=null, NAV_STACK=[];
 
 /* Offline readiness. Each of these is a thing that silently breaks offline
    mode, and none of them are visible to a tech unless we show them. */
@@ -1158,8 +1228,10 @@ function navSync(){
   try{
     if(pk===NAV_PAGE){
       history.replaceState(navSnapshot(),"");      // same page, moved along it
+      NAV_STACK[NAV_STACK.length-1]=navSnapshot();
     }else{
       history.pushState(navSnapshot(),"");
+      NAV_STACK.push(navSnapshot());
       NAV_DEPTH++;
       NAV_PAGE=pk;
     }
@@ -1175,6 +1247,7 @@ window.addEventListener("popstate",function(e){
   if(!e.state)return;
   NAV_LOCK=true;
   if(NAV_DEPTH>0)NAV_DEPTH--;
+  NAV_STACK.pop();
   navRestore(e.state);
   NAV_LAST=navKey();
   NAV_PAGE=navPageKey();
@@ -1199,6 +1272,9 @@ function render(){
 function planeBtn(){return'<button class="iconbtn'+(S.simOffline?" armed":"")+'" id="plane" '+
   'aria-pressed="'+S.simOffline+'" aria-label="Simulate losing signal">✈</button>'}
 function themeBtn(){return'<button class="iconbtn" id="thm" aria-label="Night or daylight">'+(S.theme==="day"?"☾":"☀")+'</button>'}
+/* Goes to the unit list for the job you are in — the screen techs actually
+   think of as home. From anywhere with no project, the project list. */
+function homeBtn(){return'<button class="iconbtn" id="tohome" aria-label="Project home">\u2302</button>'}
 function gearBtn(){return'<button class="iconbtn" id="gear" aria-label="This device">⚙</button>'}
 function helpBtn(){return'<button class="iconbtn" id="tohelp" aria-label="Help">?</button>'}
 function strip(){
@@ -1269,7 +1345,7 @@ function vForgot(){
 }
 function vProjects(){
   var h='<div class="bar"><h1>Your projects<span class="sub">'+esc(S.user.n)+' · '+esc(roleOf(S.user.id))+'</span></h1>'+
-    planeBtn()+themeBtn()+
+    planeBtn()+helpBtn()+
     '<button class="iconbtn" id="tomore" aria-label="Menu">☰</button></div>'+strip()+'<div class="body">';
   if(!S.projects.length){
     if(S.loadErr)
@@ -1332,7 +1408,7 @@ function vUnits(){
   });
   var h='<div class="bar"><button class="iconbtn" id="back" aria-label="Back">‹</button>'+
     '<h1>'+esc(p.name)+'<span class="sub">'+z.done+' of '+z.total+' points verified</span></h1>'+
-    planeBtn()+helpBtn()+themeBtn()+gearBtn()+'</div>'+strip();
+    planeBtn()+helpBtn()+homeBtn()+gearBtn()+'</div>'+strip();
   h+='<div class="finder"><input id="q" type="search" inputmode="search" autocomplete="off" '+
     'placeholder="Which unit are you at? AHU-03, VAV 2-15…" value="'+esc(S.q)+'"/></div>';
   var nOpen=p.points.filter(function(x){return x.issue&&!x.issue.resolved}).length;
@@ -1382,7 +1458,7 @@ function vPoints(){
        '<h1>'+nSel+' selected<span class="sub">tap points to add or remove</span></h1>'
       :'<button class="iconbtn" id="back" aria-label="Back">‹</button>'+
        '<h1>'+esc(S.unit||p.name)+'<span class="sub">'+z.done+'/'+z.total+' verified</span></h1>'+
-       planeBtn()+helpBtn()+themeBtn()+gearBtn())+
+       planeBtn()+helpBtn()+homeBtn()+gearBtn())+
     '</div>'+strip();
   if(S.pkg){
     var pk=packages(p).filter(function(k){return k.id===S.pkg})[0];
@@ -1505,7 +1581,7 @@ function vVerify(){
   var ana=isAnalog(pt.type);
   var h='<div class="bar"><button class="iconbtn" id="back2" aria-label="Back">‹</button>'+
     '<h1>'+esc(pt.unit)+'<span class="sub">Point '+(S.idx+1)+' of '+list.length+'</span></h1>'+
-    planeBtn()+helpBtn()+themeBtn()+gearBtn()+'</div>'+strip();
+    planeBtn()+helpBtn()+homeBtn()+gearBtn()+'</div>'+strip();
   h+='<div class="vpin"><div class="vtag mono">'+esc(pt.tag)+'</div>'+
     '<div class="vdesc">'+esc(pt.desc)+'</div></div>'+
     '<div class="vhead"><div class="meta">'+
@@ -1901,6 +1977,7 @@ function issueForm(m){
     '<div class="lb">Photos</div><div class="phgrid">'+
     photos.map(function(p,i){
       return'<span class="ph"><img src="'+p+'" alt="Issue photo '+(i+1)+'"/>'+
+        '<span class="phkb">'+Math.round(dataUrlBytes(p)/1024)+' KB</span>'+
         '<button class="rm" data-rmph="'+i+'" aria-label="Remove photo">×</button></span>'
     }).join("")+
     '<label class="addph" for="iphoto">+</label>'+
@@ -2067,7 +2144,7 @@ function vIssues(){
     '<h1>Defect log<span class="sub">'+esc(p.name)+'</span></h1>'+
     '<button class="iconbtn" id="toprint" aria-label="Print defect log">⎙</button>'+
     '<button class="iconbtn" id="logiss" aria-label="Log a new issue">＋</button>'+
-    themeBtn()+gearBtn()+'</div>'+strip();
+    homeBtn()+gearBtn()+'</div>'+strip();
   h+='<div class="chips">'+f.map(function(x){
     return'<button class="chip" data-df="'+x[0]+'" aria-pressed="'+(S.defFilter===x[0])+'">'+x[1]+' <b>'+x[2]+'</b></button>'
   }).join("")+
@@ -2271,7 +2348,7 @@ function vWork(){
   var mine=S.pkgFilter==="mine";
   var h='<div class="bar"><button class="iconbtn" id="backmore" aria-label="Back">‹</button>'+
     '<h1>Work packages<span class="sub">'+(mine?"assigned to you":"everyone on this job")+'</span></h1>'+
-    planeBtn()+themeBtn()+'</div>'+strip();
+    planeBtn()+homeBtn()+'</div>'+strip();
   if(isLead()){
     h+='<div class="chips">'+[["mine","Mine"],["all","Everyone"]].map(function(f){
       return'<button class="chip" data-pf="'+f[0]+'" aria-pressed="'+(S.pkgFilter===f[0])+'">'+f[1]+'</button>'
@@ -2308,7 +2385,7 @@ function vWork(){
 }
 function vMore(){
   var h='<div class="bar"><button class="iconbtn" id="backmore" aria-label="Back">‹</button>'+
-    '<h1>Menu<span class="sub">'+esc(S.user.n)+' · '+esc(roleOf(S.user.id))+'</span></h1>'+themeBtn()+'</div>'+strip();
+    '<h1>Menu<span class="sub">'+esc(S.user.n)+' · '+esc(roleOf(S.user.id))+'</span></h1>'+'</div>'+strip();
   var np=openPkgCount();
   h+=menuRow("work","▦","Work packages",
     np?np+" assigned to you and not finished":"Points someone sent you to test");
@@ -2322,7 +2399,7 @@ function vMore(){
 function vAccount(){
   var u=TECHS[S.user.id];
   var h='<div class="bar"><button class="iconbtn" id="backmore2" aria-label="Back">‹</button>'+
-    '<h1>My account</h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+    '<h1>My account</h1>'+'</div>'+strip()+'<div class="body">';
   h+='<div class="card"><h3>Who signs your work</h3>'+
     '<div style="font-size:12.5px;color:var(--dim);margin:12px 0 6px">Full name</div>'+
     '<input id="acn" value="'+esc(u.n)+'"/>'+
@@ -2355,7 +2432,7 @@ function okRow(good,label,detail){
 function vHowto(){
   var p=S.projects.length, q=S.queue.length;
   var h='<div class="bar"><button class="iconbtn" id="backhelp" aria-label="Back">‹</button>'+
-    '<h1>Help<span class="sub">offline setup and how to work</span></h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+    '<h1>Help<span class="sub">offline setup and how to work</span></h1>'+'</div>'+strip()+'<div class="body">';
 
   // --- the part that actually matters ---
   var ready = OFF.installed && OFF.sw && p>0;
@@ -2417,7 +2494,7 @@ function vHowto(){
 }
 function vInfo(){
   var h='<div class="bar"><button class="iconbtn" id="backmore2" aria-label="Back">‹</button>'+
-    '<h1>About &amp; support</h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+    '<h1>About &amp; support</h1>'+'</div>'+strip()+'<div class="body">';
   h+='<div class="card"><h3>What this is</h3>'+
     '<div style="font-size:13.5px;line-height:1.65;margin-top:7px">'+
     'Point-to-point checkout for DDC field devices. It replaces passing a spreadsheet around: '+
@@ -2443,7 +2520,7 @@ function vInfo(){
 function vAdmin(){
   var ids=Object.keys(TECHS);
   var h='<div class="bar"><button class="iconbtn" id="backmore2" aria-label="Back">‹</button>'+
-    '<h1>Admin<span class="sub">people, roles and access</span></h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+    '<h1>Admin<span class="sub">people, roles and access</span></h1>'+'</div>'+strip()+'<div class="body">';
   h+='<div class="card"><h3>At a glance</h3>'+
     '<div class="kv"><span>People</span><span>'+ids.length+'</span></div>'+
     '<div class="kv"><span>Projects</span><span>'+S.projects.length+'</span></div>'+
@@ -2482,7 +2559,7 @@ function vProjSet(){
   var act=teamActivity(p),z=stats(p.points);
   var live=act.filter(function(a){return a.hour>0}).length;
   var h='<div class="bar"><button class="iconbtn" id="back5" aria-label="Back">‹</button>'+
-    '<h1>Project settings<span class="sub">'+esc(p.name)+'</span></h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+    '<h1>Project settings<span class="sub">'+esc(p.name)+'</span></h1>'+homeBtn()+'</div>'+strip()+'<div class="body">';
 
   h+='<div class="card"><h3>Team activity</h3>'+
     '<div style="font-size:12.5px;color:var(--dim);margin-bottom:6px">'+
@@ -2545,7 +2622,11 @@ function vProjSet(){
 function vDevice(){
   var yn=function(b,y,n){return'<span style="color:'+(b?"var(--pass)":"var(--issue)")+'">'+(b?y:n)+'</span>'};
   var h='<div class="bar"><button class="iconbtn" id="back3" aria-label="Back">‹</button>'+
-    '<h1>This device<span class="sub">what is stored here</span></h1>'+themeBtn()+'</div>'+strip()+'<div class="body">';
+    '<h1>This device<span class="sub">what is stored here</span></h1>'+'</div>'+strip()+'<div class="body">';
+  h+='<div class="card"><div class="switch"><div><div class="lab">Daylight mode</div>'+
+    '<div class="hint">High contrast for a roof in full sun</div></div>'+
+    '<button class="tgl" id="thm" aria-pressed="'+(S.theme==="day")+'" '+
+    'aria-label="Daylight mode"><i></i></button></div></div>';
   h+='<div class="card"><div class="switch"><div><div class="lab">Simulate no signal</div>'+
     '<div class="hint">Stands in for a mechanical room or a shaft</div></div>'+
     '<button class="tgl" id="tgl" aria-pressed="'+S.simOffline+'" aria-label="Simulate no signal"><i></i></button></div></div>';
@@ -2575,6 +2656,19 @@ function vDevice(){
     h+='<div class="kv"><span>'+esc(p.name)+'</span><span>'+z.done+' / '+z.total+' points</span></div>'});
   h+='<button class="ghost" id="pull"'+(online()?"":" disabled")+'>'+
     (online()?"Load / refresh from server":"No signal")+'</button></div>';
+  var stuck=S.queue.filter(function(e){return e._stuck});
+  if(stuck.length){
+    h+='<div class="card" style="border-color:var(--fail)"><h3 style="color:var(--fail)">'+
+      "Will not send ("+stuck.length+')</h3>'+
+      '<div style="font-size:12.5px;color:var(--dim);line-height:1.6;margin:6px 0 10px">'+
+      'These failed three times and were parked so the rest could go through. '+
+      'Everything else has synced.</div>';
+    stuck.slice(0,8).forEach(function(e){
+      h+='<div class="qrow"><span class="mono">'+esc(e.tag||e.kind||"item")+'</span>'+
+        '<span style="max-width:58%;text-align:right">'+esc(e._err||"failed")+'</span></div>';
+    });
+    h+='<button class="ghost" id="retrystuck">Try these again</button></div>';
+  }
   h+='<div class="card"><h3>Waiting to send ('+S.queue.length+')</h3>';
   if(!S.queue.length)h+='<div style="color:var(--dim);font-size:13.5px;padding:8px 0">Nothing queued. Everything you recorded is on the server.</div>';
   S.queue.slice(-14).reverse().forEach(function(e){
@@ -2799,6 +2893,12 @@ function bind(){
   });
 
   /* ---- menu and rollout screens ---- */
+  on("tohome","click",function(){
+    S.unit=null;S.pkg=null;S.q="";S.filter="open";S.limit=60;
+    S.selecting=false;S.sel={};S.modal=null;
+    S.screen=S.proj?"units":"projects";
+    render();
+  });
   on("tomore","click",function(){S.screen="more";render()});
   on("tohelp","click",function(){S._helpFrom=S.screen;S.screen="howto";render()});
   on("backhelp","click",function(){
@@ -2866,6 +2966,10 @@ function bind(){
     toast("Create accounts in the dashboard at /_/, or have them sign up")});
   on("pull","click",function(){pull().then(render)});
   on("flushnow","click",function(){flush()});
+  on("retrystuck","click",function(){
+    S.queue.forEach(function(e){delete e._stuck;e._tries=0;qAdd(e)});
+    toast("Retrying");flush();
+  });
   on("nuke","click",function(){
     wipe().then(function(){return kvSet("dataVersion",DATA_VERSION)}).then(function(){
       S.projects=JSON.parse(JSON.stringify(SERVER_PROJECTS));
@@ -2898,10 +3002,16 @@ function bind(){
   on("chg","click",function(){S.screen="units";S.unit=null;S.q="";S.selecting=false;S.sel={};render()});
   on("chg2","click",function(){S.screen="units";S.unit=null;S.q="";render()});
   on("back2","click",function(){
-    goBack(function(){
-      if(S._prev==="issues"){S._prev="points";S.screen="issues"}else S.screen="points";
-      render();
-    });
+    // Always up to the list this point belongs to, never wherever we happened
+    // to come from. Arriving via the defect log should still leave you on the
+    // unit you were working.
+    var prev=NAV_STACK[NAV_STACK.length-2];
+    if(prev&&prev.screen==="points"&&prev.unit===S.unit&&prev.pkg===S.pkg){
+      history.back();                 // the list is genuinely behind us
+      return;
+    }
+    S.screen="points";S._prev="points";
+    render();
   });
 
   all(".chip",function(b){b.addEventListener("click",function(){S.filter=b.dataset.f;S.limit=60;render()})});
@@ -3334,7 +3444,8 @@ kvGet("dataVersion").then(function(v){
 }).then(function(){render();flush()})
   .catch(function(){S.projects=freshCopy();render()});
 
-try{history.replaceState(navSnapshot(),"");NAV_PAGE=navPageKey()}catch(e){}
+try{history.replaceState(navSnapshot(),"");NAV_PAGE=navPageKey();
+    NAV_STACK=[navSnapshot()]}catch(e){}
 
 setInterval(function(){flush()},FLUSH_EVERY);
 setInterval(function(){coworkerTick();liveTick()},COWORKER_EVERY);
