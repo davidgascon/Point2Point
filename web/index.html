@@ -1760,7 +1760,7 @@ function vVerify(){
     }).join("")+'</div>'+
     '<div style="font-size:12px;color:var(--faint);margin-top:9px">Tap once for done, again for not applicable, again to clear.</div>');
 
-  if(!pt.deleted&&isLead())
+  if(!pt.deleted)
     h+='<button class="disc" id="delpoint" style="color:var(--fail)">'+
       '<span class="grow"><span class="t" style="color:var(--fail)">Delete this point</span>'+
       '<div class="s" style="color:var(--dim)">Not on the job - stays on the sheet, marked DELETED</div>'+
@@ -1944,7 +1944,8 @@ function vModal(){
       '<textarea id="delwhy" rows="3" placeholder="Device never installed / removed from scope / duplicate row"></textarea>'+
       '<div style="font-size:12px;color:var(--faint);margin-top:10px;line-height:1.55">'+
       'It leaves the To do, Flagged and Verified lists and stops counting toward '+
-      'the percentage. You can restore it later.</div>'+
+      'the percentage. Your name and this reason go on the record, and anyone '+
+      'can restore it later.</div>'+
       '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button>'+
       '<button id="delgo" style="background:var(--fail);color:#0B1013">Delete point</button></div>'+
       '</div></div>';
