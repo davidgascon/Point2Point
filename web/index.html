@@ -798,7 +798,7 @@ var S={screen:"signin",user:null,proj:null,unit:null,q:"",filter:"open",idx:0,
   sort:"sheet",pkg:null,pkgFilter:"mine",loadErr:null,
   authMode:"signin",authErr:null,authOk:null,authEmail:"",suName:"",suInit:"",suEmail:"",
   prefs:{openLife:false,openReading:false,openChecks:true,openNotes:false,
-         tolAI:"2",tolAO:"3"}};
+         confirmPass:true,tolAI:"2",tolAO:"3"}};
 var LIFE=["Installed","Wired"],VERDICT=["Pass","Fail","Issue"];
 var CHECKS=["Trends","Alarm","Graphic","Startup"];
 var CKLAB={Trends:"Trend / history",Alarm:"Alarm",Graphic:"Graphic",Startup:"Startup date"};
@@ -1916,6 +1916,33 @@ function vModal(){
       ';color:'+(it.resolved?"var(--text)":"#0B1013")+'">'+
       (it.resolved?"Reopen":"Mark resolved")+'</button></div></div></div>';
   }
+  if(m.kind==="confirmpass"){
+    var cpPt=queue()[S.idx],cpD=S.draft||{};
+    return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
+      '<div style="display:flex;align-items:flex-start;gap:10px">'+
+      '<h2 style="flex:1">Mark this point Pass?</h2>'+
+      '<button class="iconbtn" id="cpwhy" aria-label="Why am I seeing this" '+
+      'style="flex:none;border:1px solid var(--edge)">?</button></div>'+
+      '<div class="sh"><span class="mono" style="font-size:14px;color:var(--text)">'+
+      esc(m.tag)+'</span><br>'+esc(m.desc||"")+'</div>'+
+      (cpPt?'<div class="dev" style="margin-top:0">'+
+        readingSummary(cpPt,cpD)+'</div>':'')+
+      (m.why
+        ?'<div class="tip" style="margin-top:14px"><b>Why this asks</b>'+
+         'A Pass is a signature. It goes on the P2P sheet with your initials and '+
+         'the date, and it is what the customer relies on at turnover. This step '+
+         'is one second of friction so a point never gets signed off from memory '+
+         'or by a mis-tap in a dark mech room.'+
+         '<div style="margin-top:9px;color:var(--dim)">To switch it off: Menu, '+
+         'then My account, then turn off "Confirm before passing a point". '+
+         'It is per person — turning it off does not change it for anyone else.</div>'+
+         '</div>'
+        :'')+
+      '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">'+
+      'Go back</button>'+
+      '<button id="cpgo" style="background:var(--pass);color:#0B1013">Yes, pass it</button></div>'+
+      '</div></div>';
+  }
   if(m.kind==="viewph"){
     return'<div class="ovl lightbox" id="ovl">'+
       '<img class="lbimg" src="'+m.src+'" alt="Photo"/>'+
@@ -2559,6 +2586,13 @@ function vAccount(){
     '<div style="font-size:12.5px;color:var(--dim);margin:12px 0 6px">Work email</div>'+
     '<input id="ace" value="'+esc(u.email||"")+'"/>'+
     '<button class="ghost" id="acsave">Save</button></div>';
+  h+='<div class="card"><h3>How you work</h3>'+
+    '<div class="switch"><div><div class="lab">Confirm before passing a point</div>'+
+    '<div class="hint">One extra tap on Pass. A signature should be deliberate.</div></div>'+
+    '<button class="tgl" data-pref="confirmPass" aria-pressed="'+(!!S.prefs.confirmPass)+'" '+
+    'aria-label="Confirm before passing a point"><i></i></button></div>'+
+    '<div style="font-size:11.5px;color:var(--faint);margin-top:4px">'+
+    'This is yours alone — it does not change anything for the rest of the crew.</div></div>';
   h+='<div class="card"><h3>Password</h3>'+
     '<div style="font-size:12.5px;color:var(--dim);margin:12px 0 6px">New password</div>'+
     '<input id="acp" type="password" autocomplete="new-password"/>'+
@@ -2887,6 +2921,11 @@ function loadDraft(){
 }
 function commit(v,advance){
   var pt=queue()[S.idx];
+  if(v==="Pass"&&S.prefs.confirmPass){
+    S.modal={kind:"confirmpass",advance:!!advance,pointId:pt.id,tag:pt.tag,
+      desc:pt.desc,why:false};
+    render();return;
+  }
   if(v==="Fail"||v==="Issue"){
     var ex=pt.issue&&!pt.issue.resolved?pt.issue:null;
     S.modal={kind:"issue",verdict:v,pointId:pt.id,tag:pt.tag,
@@ -3206,15 +3245,10 @@ function bind(){
   on("chg","click",function(){S.screen="units";S.unit=null;S.q="";S.selecting=false;S.sel={};render()});
   on("chg2","click",function(){S.screen="units";S.unit=null;S.q="";render()});
   on("back2","click",function(){
-    // Always up to the list this point belongs to, never wherever we happened
-    // to come from. Arriving via the defect log should still leave you on the
-    // unit you were working.
-    var prev=NAV_STACK[NAV_STACK.length-2];
-    if(prev&&prev.screen==="points"&&prev.unit===S.unit&&prev.pkg===S.pkg){
-      history.back();                 // the list is genuinely behind us
-      return;
-    }
-    S.screen="points";S._prev="points";
+    S.screen="points";
+    S._prev="points";
+    S.modal=null;
+    S.selecting=false;S.sel={};
     render();
   });
 
@@ -3601,6 +3635,12 @@ function bind(){
       canDelete:true,tag:pt.tag};
     render();
   })});
+  on("cpwhy","click",function(){S.modal.why=!S.modal.why;render()});
+  on("cpgo","click",function(){
+    var adv=S.modal.advance;
+    S.modal=null;
+    doCommit("Pass",null,adv);
+  });
   on("lbclose","click",function(){
     var back=S.modal&&S.modal.back;
     if(back){S.modal=back;render();return}
