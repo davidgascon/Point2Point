@@ -310,6 +310,17 @@ section.blk{padding:16px;border-bottom:1px solid var(--edge)}
 .phgrid img{width:74px;height:74px;object-fit:cover;border-radius:9px;border:1px solid var(--edge)}
 .phgrid .phkb{position:absolute;bottom:3px;left:3px;font-size:9px;font-weight:700;
   background:rgba(0,0,0,.6);color:#fff;border-radius:4px;padding:1px 4px;letter-spacing:.02em}
+.lightbox{flex-direction:column;background:rgba(0,0,0,.93);padding:0}
+.lbimg{flex:1;min-height:0;width:100%;object-fit:contain;
+  padding:calc(14px + env(safe-area-inset-top,0px)) 10px 10px}
+.lbbar{flex:none;width:100%;display:flex;align-items:center;justify-content:space-between;
+  gap:12px;padding:12px 16px calc(14px + env(safe-area-inset-bottom,0px));
+  background:rgba(0,0,0,.6)}
+.lbbar button{font-size:15px;font-weight:600;color:#fff;padding:10px 16px;
+  border:1px solid rgba(255,255,255,.3);border-radius:10px;min-height:44px}
+.lbbar button.danger{color:var(--fail);border-color:var(--fail)}
+.lbnum{font-size:13px;color:rgba(255,255,255,.6)}
+.phgrid .ph{border:none;padding:0;background:none}
 .phgrid .rm{position:absolute;top:-6px;right:-6px;width:24px;height:24px;border-radius:50%;
   background:var(--fail);color:#0B1013;font-weight:700;font-size:14px;display:grid;place-items:center}
 .addph{width:74px;height:74px;border-radius:9px;border:1px dashed var(--edge);
@@ -1760,8 +1771,9 @@ function vVerify(){
       :'<span style="color:var(--faint)">None</span>',
     '<div class="phgrid">'+
     phs.map(function(p,i){
-      return'<span class="ph"><img src="'+p+'" alt="Point photo '+(i+1)+'"/>'+
-        '<button class="rm" data-rmpt="'+i+'" aria-label="Remove photo">\u00d7</button></span>'
+      return'<button class="ph" data-viewph="'+i+'" aria-label="View photo '+(i+1)+'">'+
+        '<img src="'+p+'" alt="Point photo '+(i+1)+'"/>'+
+        (/^data:/.test(p)?'<span class="phkb">sending</span>':'')+'</button>'
     }).join("")+
     (phs.length<8
       ?'<label class="addph" for="ptphoto">+</label>'+
@@ -1893,7 +1905,9 @@ function vModal(){
       (it.blocks&&!it.resolved?'<span class="blocks">BLOCKS CHECKOUT</span>':'')+'</div>'+
       '<div style="font-size:14.5px;margin-top:12px">'+esc(it.desc)+'</div>'+
       ((it.photos&&it.photos.length)?'<div class="phgrid">'+
-        it.photos.map(function(ph,n){return'<img src="'+ph+'" alt="Photo '+(n+1)+'"/>'}).join("")+
+        it.photos.map(function(ph,n){
+          return'<button class="ph" data-viewiss="'+n+'" aria-label="View photo '+(n+1)+'">'+
+            '<img src="'+ph+'" alt="Photo '+(n+1)+'"/></button>'}).join("")+
         '</div>':'')+
       (it.resolved?'<div style="font-size:12.5px;color:var(--pass);margin-top:12px">Closed by '+
         (TECHS[it.resolvedBy]?esc(TECHS[it.resolvedBy].n):"—")+'</div>':'')+
@@ -1901,6 +1915,25 @@ function vModal(){
       '<button id="ires" style="background:'+(it.resolved?"var(--edge)":"var(--pass)")+
       ';color:'+(it.resolved?"var(--text)":"#0B1013")+'">'+
       (it.resolved?"Reopen":"Mark resolved")+'</button></div></div></div>';
+  }
+  if(m.kind==="viewph"){
+    return'<div class="ovl lightbox" id="ovl">'+
+      '<img class="lbimg" src="'+m.src+'" alt="Photo"/>'+
+      '<div class="lbbar"><button id="lbclose">Close</button>'+
+      '<span class="lbnum">'+(m.i+1)+' of '+m.total+'</span>'+
+      (m.canDelete?'<button id="lbdel" class="danger">Delete</button>':'<span></span>')+
+      '</div></div>';
+  }
+  if(m.kind==="delphoto"){
+    return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
+      '<h2>Delete this photo?</h2>'+
+      '<div class="sh">Photo '+(m.i+1)+' on <span class="mono">'+esc(m.tag)+'</span>. '+
+      'It is removed from the record and cannot be brought back.</div>'+
+      '<img src="'+m.src+'" style="width:100%;max-height:220px;object-fit:contain;'+
+      'border-radius:11px;border:1px solid var(--edge);margin-top:6px"/>'+
+      '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Keep it</button>'+
+      '<button id="delphgo" style="background:var(--fail);color:#0B1013">Delete photo</button></div>'+
+      '</div></div>';
   }
   if(m.kind==="delpoint"){
     return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
@@ -3305,6 +3338,14 @@ function bind(){
   all("[data-dr]",function(b){b.addEventListener("click",function(){S.defPrio=b.dataset.dr;render()})});
   on("defclear","click",function(){S.defParty="any";S.defPrio="any";
     S.defKind="any";S.defScope="any";render()});
+  all("[data-viewiss]",function(b){b.addEventListener("click",function(){
+    var p=proj(),it=(p.issues||[]).filter(function(q){return q.id===S.modal.issueId})[0];
+    if(!it||!it.photos)return;
+    var n=+b.dataset.viewiss, back=S.modal;
+    S.modal={kind:"viewph",src:it.photos[n],i:n,total:it.photos.length,
+      canDelete:false,tag:it.unit||"issue",back:back};
+    render();
+  })});
   on("ires","click",function(){
     var p=proj(),it=(p.issues||[]).filter(function(q){return q.id===S.modal.issueId})[0];
     if(!it)return;
@@ -3551,12 +3592,30 @@ function bind(){
       toast("Photo added \u2014 "+Math.round(dataUrlBytes(data)/1024)+" KB");
     });
   });
-  all("[data-rmpt]",function(b){b.addEventListener("click",function(){
+  all("[data-viewph]",function(b){b.addEventListener("click",function(){
     var pt=queue()[S.idx];if(!pt)return;
-    S.open.photos=true;
-    pointPhotoEvent(pt,{remove:+b.dataset.rmpt});
-    toast("Photo removed");
+    var i=+b.dataset.viewph, src=(pt.photos||[])[i];
+    if(!src)return;
+    S.modal={kind:"viewph",src:src,i:i,total:(pt.photos||[]).length,
+      canDelete:true,tag:pt.tag};
+    render();
   })});
+  on("lbclose","click",function(){
+    var back=S.modal&&S.modal.back;
+    if(back){S.modal=back;render();return}
+    goBack(function(){S.modal=null;render()});
+  });
+  on("lbdel","click",function(){
+    var m=S.modal;
+    S.modal={kind:"delphoto",i:m.i,src:m.src,tag:m.tag};render();
+  });
+  on("delphgo","click",function(){
+    var pt=queue()[S.idx],m=S.modal;
+    if(!pt){S.modal=null;render();return}
+    S.modal=null;S.open.photos=true;
+    pointPhotoEvent(pt,{remove:m.i});
+    toast("Photo deleted");
+  });
   on("delpoint","click",function(){
     var pt=queue()[S.idx];if(!pt)return;
     S.modal={kind:"delpoint",pointId:pt.id,tag:pt.tag};render();
