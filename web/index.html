@@ -1284,6 +1284,20 @@ function breakdown(pts){
    Each navigable state pushes a history entry; going back restores it. */
 var NAV_DEPTH=0, NAV_LOCK=false, NAV_LAST=null, NAV_PAGE=null, NAV_STACK=[];
 
+/* Scroll memory. A unit can run to a couple of hundred points; coming back
+   from verifying one and landing at the top again means hunting for your
+   place every single time. Position is kept per page, not per render, so a
+   toast or a live update from someone else does not move you. */
+var SCROLL={}, SCROLL_KEY=null, SCROLL_TICK=null;
+window.addEventListener("scroll",function(){
+  if(!SCROLL_KEY)return;
+  if(SCROLL_TICK)return;
+  SCROLL_TICK=setTimeout(function(){
+    SCROLL_TICK=null;
+    if(SCROLL_KEY)SCROLL[SCROLL_KEY]=window.scrollY||window.pageYOffset||0;
+  },120);
+},{passive:true});
+
 /* Offline readiness. Each of these is a thing that silently breaks offline
    mode, and none of them are visible to a tech unless we show them. */
 var OFF={installed:false,sw:false,persisted:false};
@@ -1361,6 +1375,15 @@ function render(){
   h+=vModal();
   if(S.toast)h+='<div class="toast">'+esc(S.toast)+'</div>';
   el("app").innerHTML=h;bind();
+  var pageKey=S.user?navPageKey():null;
+  if(pageKey!==SCROLL_KEY){
+    SCROLL_KEY=pageKey;
+    var want=SCROLL[pageKey]||0;
+    // After the DOM has laid out, or the page is not yet tall enough to scroll.
+    requestAnimationFrame(function(){
+      requestAnimationFrame(function(){window.scrollTo(0,want)});
+    });
+  }
   var bar=document.querySelector(".bar");
   if(bar)document.documentElement.style.setProperty("--barh",bar.offsetHeight+"px");
   navSync();
@@ -3234,13 +3257,17 @@ function bind(){
     var f=el("q");if(f){f.focus();try{f.setSelectionRange(pos,pos)}catch(_){}}
   });
   on("back","click",function(){
-    goBack(function(){
-      if(S.screen==="points"){
-        if(S.pkg){S.pkg=null;S.screen=(S._prev==="work")?"work":"units"}
-        else{S.screen="units";S.unit=null}
-      }else S.screen="projects";
-      render();
-    });
+    // Deterministic, like the arrow on a point: up one level, never "wherever
+    // I came from". From a point list that is the controller list; from the
+    // controller list it is the project list.
+    S.modal=null;S.selecting=false;S.sel={};
+    if(S.screen==="points"){
+      if(S.pkg){S.pkg=null;S.screen=(S._prev==="work")?"work":"units"}
+      else{S.screen="units";S.unit=null}
+    }else{
+      S.screen="projects";S.unit=null;S.pkg=null;
+    }
+    render();
   });
   on("chg","click",function(){S.screen="units";S.unit=null;S.q="";S.selecting=false;S.sel={};render()});
   on("chg2","click",function(){S.screen="units";S.unit=null;S.q="";render()});
