@@ -577,6 +577,22 @@ function pbLoadTechs(){
     return out;
   });
 }
+/* The log reads from the events collection, which is the audit trail itself
+   rather than a second record that could drift from it. */
+function pbLoadEvents(projectId){
+  return pb.collection("events").getList(1,120,{
+    requestKey:null,filter:'project="'+projectId+'"',sort:"-at"
+  }).then(function(r){
+    return r.items.map(function(rec){
+      var pay=rec.payload||{};
+      pay.id=pay.id||rec.client_id;
+      pay.by=pay.by||rec.by;
+      pay.at=pay.at||rec.at;
+      pay._server=true;
+      return pay;
+    });
+  });
+}
 function pbLoadProjects(){
   return pb.collection("projects").getFullList({requestKey:null,batch:200})
     .then(function(projs){
@@ -795,7 +811,8 @@ var S={screen:"signin",user:null,proj:null,unit:null,q:"",filter:"open",idx:0,
   open:{},selecting:false,sel:{},massMode:"mark",massChecks:{Trends:true,Alarm:true,Graphic:true},
   modal:null,defFilter:"open",defParty:"any",defPrio:"any",defKind:"any",defScope:"any",
   printOpts:{status:"open",prio:"any",party:"any",unit:"any",kind:"any",notes:true},
-  sort:"sheet",pkg:null,pkgFilter:"mine",loadErr:null,
+  sort:"sheet",pkg:null,pkgFilter:"mine",loadErr:null,defSel:false,defPick:{},
+  log:[],logFilter:"mine",logLoading:false,
   authMode:"signin",authErr:null,authOk:null,authEmail:"",suName:"",suInit:"",suEmail:"",
   prefs:{openLife:false,openReading:false,openChecks:true,openNotes:false,
          confirmPass:true,tolAI:"2",tolAO:"3"}};
@@ -1016,7 +1033,11 @@ function applyEvent(ev,projects){
     return pt;
   }
   if(pt.at&&pt.at>ev.at)return pt;
-  pt.status=ev.status;pt.by=ev.by;pt.at=ev.at;
+  pt.status=ev.status;
+  // An undo restores whoever signed it originally; a normal verdict credits
+  // the person making it.
+  pt.by=ev.undoOf?(ev.restoreBy||null):ev.by;
+  pt.at=ev.undoOf?(ev.restoreAt||null):ev.at;
   if(ev.reading)pt.reading=ev.reading;
   if(ev.checks)pt.checks=ev.checks;
   if(ev.notes!==undefined)pt.notes=ev.notes;
@@ -1193,6 +1214,24 @@ function railOf(list){
 }
 function qHas(id){return S.queue.some(function(e){return e.pointId===id})}
 function packages(p){return (p||proj()) ? ((p||proj()).packages||[]) : []}
+/* Defects in a package are referenced by the id allIssues() gives them, which
+   covers both point-scoped defects ("p123") and unit/job issues (the record
+   id). That keeps one list rather than two parallel ones. */
+function pkgIssues(p,pk){
+  var ids=pk.issueIds||[];
+  if(!ids.length)return[];
+  return allIssues(p).filter(function(x){return ids.indexOf(x.id)>=0});
+}
+/* Which unit a package belongs to, for grouping. A package built from one
+   controller names it; a mixed one says so rather than guessing. */
+function pkgUnit(p,pk){
+  var us={};
+  pkgPoints(p,pk).forEach(function(x){if(x.unit)us[x.unit]=1});
+  pkgIssues(p,pk).forEach(function(x){if(x.unit)us[x.unit]=1});
+  var k=Object.keys(us);
+  if(!k.length)return "Unassigned";
+  return k.length===1?k[0]:"Multiple units";
+}
 function pkgPoints(p,pk){
   var set={};(pk.pointIds||[]).forEach(function(i){set[i]=1});
   return p.points.filter(function(x){return set[x.id]});
@@ -1200,8 +1239,11 @@ function pkgPoints(p,pk){
 function pkgStats(p,pk){
   var pts=pkgPoints(p,pk),done=pts.filter(function(x){
     return["Pass","Fail","Issue"].indexOf(x.status)>=0||x.p2pNA}).length;
-  return{total:pts.length,done:done,left:pts.length-done,
-    pct:pts.length?Math.round(done/pts.length*100):0};
+  var iss=pkgIssues(p,pk),fixed=iss.filter(function(x){return x.issue.resolved}).length;
+  var total=pts.length+iss.length, settled=done+fixed;
+  return{total:total,done:settled,left:total-settled,
+    points:pts.length,issues:iss.length,issuesOpen:iss.length-fixed,
+    pct:total?Math.round(settled/total*100):0};
 }
 function myPackages(p){
   return packages(p).filter(function(k){return k.assignee===S.user.id});
@@ -1365,12 +1407,51 @@ window.addEventListener("popstate",function(e){
   NAV_LOCK=false;
 });
 
+/* ═══════ undo ═══════
+   The event log is append-only, so undo appends the opposite rather than
+   deleting anything. Both the change and its reversal stay on the record,
+   which is the point: a sign-off that was withdrawn is itself information. */
+function canUndo(ev){
+  if(!ev||ev.undone)return false;
+  if(["verdict","life","checks","edit","delete"].indexOf(ev.kind)<0)return false;
+  if(!ev.prev)return false;            // recorded before undo existed
+  return ev.by===S.user.id||isLead();
+}
+function undoReason(ev){
+  if(!ev)return "";
+  if(ev.undone)return "already undone";
+  if(["verdict","life","checks","edit","delete"].indexOf(ev.kind)<0)
+    return "this kind of change cannot be undone";
+  if(!ev.prev)return "recorded before undo existed";
+  if(ev.by!==S.user.id&&!isLead())return "only a lead can undo someone else's work";
+  return "";
+}
+function buildUndo(ev){
+  var base={id:uid(),projectId:ev.projectId,pointId:ev.pointId,tag:ev.tag,
+    unit:ev.unit,by:S.user.id,at:Date.now(),undoOf:ev.id};
+  var p=ev.prev||{};
+  if(ev.kind==="verdict")
+    return Object.assign(base,{kind:"verdict",status:p.status,
+      reading:p.reading||null,checks:p.checks||{},notes:p.notes||"",
+      restoreBy:p.by||null,restoreAt:p.at||null});
+  if(ev.kind==="life")
+    return Object.assign(base,{kind:"life",status:p.status||null});
+  if(ev.kind==="checks")
+    return Object.assign(base,{kind:"edit",field:"checks",value:p.checks||{}});
+  if(ev.kind==="edit")
+    return Object.assign(base,{kind:"edit",field:ev.field,value:p.value});
+  if(ev.kind==="delete")
+    return Object.assign(base,{kind:"delete",deleted:!!p.deleted,reason:p.reason||""});
+  return null;
+}
+
 /* ───────── views ───────── */
 function render(){
   document.documentElement.setAttribute("data-theme",S.theme==="day"?"day":"night");
   var v={signin:vSignin,projects:vProjects,units:vUnits,points:vPoints,verify:vVerify,
          device:vDevice,issues:vIssues,projset:vProjSet,
-         more:vMore,account:vAccount,howto:vHowto,info:vInfo,admin:vAdmin,work:vWork}[S.screen];
+         more:vMore,account:vAccount,howto:vHowto,info:vInfo,admin:vAdmin,work:vWork,
+         log:vLog}[S.screen];
   var h=v();
   h+=vModal();
   if(S.toast)h+='<div class="toast">'+esc(S.toast)+'</div>';
@@ -1590,7 +1671,23 @@ function vPoints(){
     if(pk){var pz=pkgStats(p,pk);
       h+='<div class="pkgbar"><span><b>'+esc(pk.name)+'</b> — '+pz.done+' of '+pz.total+' done'+
         (pk.due?' · '+esc(dueLabel(pk.due)):'')+'</span>'+
-        '<button id="leavepkg">Leave</button></div>';}
+        '<button id="leavepkg">Leave</button></div>';
+      var pkIss=pkgIssues(p,pk).filter(function(x){return!x.issue.resolved});
+      if(pkIss.length){
+        h+='<div class="subhd" style="color:var(--fail)">'+pkIss.length+
+          ' defect'+(pkIss.length===1?"":"s")+' in this package</div>';
+        pkIss.forEach(function(x){
+          var i=x.issue;
+          h+='<button class="uissue" data-pkgiss="'+esc(x.id)+'">'+
+            '<span style="color:'+kindColor(i.kind)+';font-weight:700;flex:none">'+
+            esc((i.kind||"Defect").toUpperCase())+'</span>'+
+            '<span style="flex:1;min-width:0"><b>'+esc(x.tag)+'</b>'+
+            '<span style="color:var(--dim)">'+esc(i.desc||"")+'</span></span>'+
+            '<span style="color:var(--faint)">›</span></button>';
+        });
+        h+='<div class="subhd">Points in this package</div>';
+      }
+    }
   }
   h+='<div class="unitbar"><span class="nm">'+
     (S.pkg?"Assigned points":(S.unit?esc(S.unit):"All units"))+'</span>'+
@@ -1938,6 +2035,28 @@ function vModal(){
       '<button id="ires" style="background:'+(it.resolved?"var(--edge)":"var(--pass)")+
       ';color:'+(it.resolved?"var(--text)":"#0B1013")+'">'+
       (it.resolved?"Reopen":"Mark resolved")+'</button></div></div></div>';
+  }
+  if(m.kind==="pkgpick"){
+    var pp=proj(),pks=packages(pp);
+    return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
+      '<h2>Add to a work package</h2>'+
+      '<div class="sh">'+m.ids.length+' defect'+(m.ids.length===1?"":"s")+
+      '. A package can hold points and defects together, so the person working '+
+      'it sees the retests alongside the verifications.</div>'+
+      (pks.length
+        ?pks.map(function(k){
+          var z=pkgStats(pp,k),w=TECHS[k.assignee];
+          return'<button class="sortrow" data-pkgadd="'+esc(k.id)+'">'+
+            '<span style="flex:1;min-width:0"><span style="font-weight:600">'+esc(k.name)+'</span>'+
+            '<div style="font-size:12px;color:var(--dim)">'+esc(pkgUnit(pp,k))+
+            (w?' · '+esc(w.n):'')+' · '+z.total+' item'+(z.total===1?"":"s")+'</div></span>'+
+            '<span style="color:var(--faint)">›</span></button>';
+        }).join("")
+        :'<div style="font-size:13px;color:var(--dim);padding:10px 0">'+
+         'No packages on this job yet.</div>')+
+      '<button class="ghost" id="pkgnew">+ New package for these defects</button>'+
+      '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button></div>'+
+      '</div></div>';
   }
   if(m.kind==="confirmpass"){
     var cpPt=queue()[S.idx],cpD=S.draft||{};
@@ -2335,6 +2454,8 @@ function vIssues(){
   var h='<div class="bar"><button class="iconbtn" id="back4" aria-label="Back">‹</button>'+
     '<h1>Defect log<span class="sub">'+esc(p.name)+'</span></h1>'+
     '<button class="iconbtn" id="toprint" aria-label="Print defect log">⎙</button>'+
+    '<button class="iconbtn" id="defsel" aria-label="Select defects"'+
+    (S.defSel?' style="color:var(--accent)"':'')+'>☑</button>'+
     '<button class="iconbtn" id="logiss" aria-label="Log a new issue">＋</button>'+
     homeBtn()+gearBtn()+'</div>'+strip();
   h+='<div class="chips">'+f.map(function(x){
@@ -2343,16 +2464,29 @@ function vIssues(){
   '<button class="sortchip" id="deffil" style="'+
   (defFiltersOn()?"border-style:solid;border-color:var(--accent)":"")+
   '">⚙ '+esc(defLabel())+'</button></div>';
+  if(S.defSel&&Object.keys(S.defPick||{}).length)
+    h+='<div class="fab"><button class="big" id="defpkg" style="background:var(--wired)">'+
+      'Add '+Object.keys(S.defPick).length+' to a work package</button></div>';
   if(!list.length)return h+'<div class="emptyish"><b>'+
     (defFiltersOn()?"Nothing matches those filters":
       (S.defFilter==="open"?"No open defects":"Nothing here"))+'</b>'+
     (defFiltersOn()?"Tap the filter chip to widen it.":
       (S.defFilter==="open"?"Every failure on this job has been retested and passed.":"Try another filter."))+'</div>';
+  if(S.defSel){
+    var nsel=Object.keys(S.defPick||{}).length;
+    h+='<div class="strip" style="background:var(--panel2)">'+
+      '<span class="grow">'+(nsel?nsel+' selected':'Tap defects to select them')+'</span>'+
+      '<button id="defcancel">Done</button></div>';
+  }
   var hrs=list.reduce(function(a,x){return a+(parseFloat(x.issue.hours)||0)},0);
   if(hrs)h+='<div class="subhd">'+hrs+' extra hours captured across these items</div>';
   list.forEach(function(x){
     var i=x.issue,res=!!i.resolved;
-    h+='<button class="def" data-def="'+esc(x.id)+'">'+
+    var picked=!!(S.defPick&&S.defPick[x.id]);
+    h+='<button class="def" data-def="'+esc(x.id)+'"'+
+      (picked?' style="background:rgba(255,138,61,.10)"':'')+'>'+
+      (S.defSel?'<span class="selbox'+(picked?" on":"")+'" style="float:left;margin:2px 10px 6px 0">'+
+        (picked?"✓":"")+'</span>':'')+
       '<div class="defhd"><span class="defno">'+x.def+'</span>'+
       '<span class="kind" style="background:'+kindColor(i.kind||"Defect")+'">'+esc(i.kind||"Defect").toUpperCase()+'</span>'+
       (x.scope!=="point"?'<span class="scope">'+(x.scope==="job"?"WHOLE JOB":"UNIT")+'</span>':'')+
@@ -2551,13 +2685,28 @@ function vWork(){
     var list=packages(p).filter(function(k){return!mine||k.assignee===S.user.id});
     if(!list.length)return;
     list.sort(function(a,b){return(a.due||9e15)-(b.due||9e15)});
-    h+='<div class="grouphd">'+esc(p.name)+'</div>';
+    // Grouped by controller, because that is how the work is actually walked.
+    var byUnit={},order=[];
     list.forEach(function(k){
+      var u=pkgUnit(p,k);
+      if(!byUnit[u]){byUnit[u]=[];order.push(u)}
+      byUnit[u].push(k);
+    });
+    order.sort(function(a,b){
+      if(a==="Multiple units")return 1; if(b==="Multiple units")return -1;
+      return natCmp(a,b);
+    });
+    h+='<div class="grouphd" style="font-size:13px;color:var(--text)">'+esc(p.name)+'</div>';
+    order.forEach(function(u){
+    h+='<div class="grouphd">'+esc(u)+' · '+byUnit[u].length+
+       ' package'+(byUnit[u].length===1?"":"s")+'</div>';
+    byUnit[u].forEach(function(k){
       any++;
-      var z=pkgStats(p,k),done=z.left===0,u=TECHS[k.assignee];
+      // Named `who`, not `u`: `u` is the unit we are grouped under here.
+      var z=pkgStats(p,k),done=z.left===0,who=TECHS[k.assignee];
       h+='<button class="pkg" data-pkg="'+p.id+'|'+k.id+'">'+
         '<div class="ph">'+
-        '<span class="who2">'+esc(u?u.i:"?")+'</span>'+
+        '<span class="who2">'+esc(who?who.i:"?")+'</span>'+
         (done?'<span class="prio" style="background:var(--pass);color:#0B1013">DONE</span>':'')+
         (k.due&&!done?'<span class="prio" style="background:'+
           (k.due<Date.now()?"var(--fail)":"var(--issue)")+';color:#0B1013">'+
@@ -2565,14 +2714,76 @@ function vWork(){
         '</div>'+
         '<div class="nm">'+esc(k.name)+'</div>'+
         '<div class="mt">'+z.done+' of '+z.total+' done'+
-        (u?' · '+esc(u.n):'')+
+        (z.issues?' · '+z.issues+' defect'+(z.issues===1?"":"s")+
+          (z.issuesOpen?' ('+z.issuesOpen+' open)':''):'')+
+        (who?' · '+esc(who.n):'')+
         (k.note?' · '+esc(k.note):'')+'</div>'+
         '<div class="bar2"><i style="width:'+z.pct+'%"></i></div></button>';
+    });
     });
   });
   if(!any)h+='<div class="emptyish"><b>'+(mine?"Nothing assigned to you":"No packages yet")+'</b>'+
     (isLead()?"Open a unit, tap Select, pick the points and assign them.":
       "Your lead can send you a set of points to work through.")+'</div>';
+  return h;
+}
+function evSummary(ev){
+  var who=TECHS[ev.by]?TECHS[ev.by].n.split(" ")[0]:"Someone";
+  if(ev.undoOf)return who+" undid a change on "+(ev.tag||"a point");
+  if(ev.kind==="verdict")return who+" marked "+(ev.tag||"a point")+" "+(ev.status||"cleared");
+  if(ev.kind==="life")return who+" set "+(ev.tag||"a point")+" "+(ev.status||"cleared");
+  if(ev.kind==="checks")return who+" "+({mark:"marked",na:"set N/A on",clear:"cleared"}[ev.mode]||"changed")+
+    " "+Object.keys(ev.checks||{}).join(", ")+" on "+(ev.tag||"a point");
+  if(ev.kind==="edit")return who+" changed "+(ev.field==="checks"?"the checks":ev.field)+
+    " on "+(ev.tag||"a point");
+  if(ev.kind==="delete")return who+(ev.deleted?" deleted ":" restored ")+(ev.tag||"a point");
+  if(ev.kind==="issue")return who+" logged a "+((ev.issue&&ev.issue.kind)||"defect");
+  if(ev.kind==="resolve")return who+(ev.resolved?" closed":" reopened")+" a defect";
+  if(ev.kind==="photo")return who+(ev.remove!==undefined?" removed":" added")+
+    " a photo on "+(ev.tag||"a point");
+  if(ev.kind==="package")return who+" changed a work package";
+  return who+" made a change";
+}
+function vLog(){
+  var mine=S.logFilter==="mine";
+  var h='<div class="bar"><button class="iconbtn" id="backlog" aria-label="Back">‹</button>'+
+    '<h1>Recent changes<span class="sub">'+(mine?"yours":"everyone on this job")+'</span></h1>'+
+    homeBtn()+'</div>'+strip();
+  h+='<div class="chips">'+[["mine","Mine"],["all","Everyone"]].map(function(f){
+    return'<button class="chip" data-lf="'+f[0]+'" aria-pressed="'+(S.logFilter===f[0])+'">'+
+      f[1]+'</button>'}).join("")+'</div>';
+
+  // Pending items first: they are the ones most likely to be a mistake you
+  // have just noticed.
+  var evs=S.queue.slice().concat(S.log||[]);
+  var seen={},list=[];
+  evs.forEach(function(e){if(e&&e.id&&!seen[e.id]){seen[e.id]=1;list.push(e)}});
+  // An undo marks its target so the row can say so.
+  var undone={};list.forEach(function(e){if(e.undoOf)undone[e.undoOf]=1});
+  list.forEach(function(e){if(undone[e.id])e.undone=true});
+  list=list.filter(function(e){return!mine||e.by===S.user.id});
+  list.sort(function(a,b){return(b.at||0)-(a.at||0)});
+
+  if(S.logLoading)h+='<div class="note">Loading the log…</div>';
+  if(!list.length)return h+'<div class="emptyish"><b>Nothing yet</b>'+
+    (mine?"Changes you make show up here.":"No changes recorded on this job yet.")+'</div>';
+
+  list.slice(0,80).forEach(function(e){
+    var pending=S.queue.some(function(q){return q.id===e.id});
+    var why=undoReason(e), can=!why;
+    h+='<div class="def" style="cursor:default">'+
+      '<div class="defhd">'+
+      (pending?'<span class="qbadge">ON PHONE</span>':'')+
+      (e.undoOf?'<span class="scope">UNDO</span>':'')+
+      (e.undone?'<span class="scope" style="color:var(--faint)">UNDONE</span>':'')+
+      '<span class="defno">'+esc(ago(e.at))+'</span></div>'+
+      '<div class="ds" style="margin-top:2px">'+esc(evSummary(e))+'</div>'+
+      (e.unit?'<div class="un">'+esc(e.unit)+'</div>':'')+
+      '<div class="ft" style="display:flex;align-items:center;gap:10px">'+
+      '<span style="flex:1">'+(can?"":esc(why))+'</span>'+
+      (can?'<button class="chip" data-undo="'+esc(e.id)+'" style="min-height:36px">Undo</button>':'')+
+      '</div></div>';
+  });
   return h;
 }
 function vMore(){
@@ -2581,6 +2792,7 @@ function vMore(){
   var np=openPkgCount();
   h+=menuRow("work","▦","Work packages",
     np?np+" assigned to you and not finished":"Points someone sent you to test");
+  h+=menuRow("log","↺","Recent changes","Undo something you just did");
   h+=menuRow("account","◍","My account","Name, initials, password, sign out");
   h+=menuRow("howto","▤","How to use this","Field workflow, offline, one-page guide");
   h+=menuRow("info","◇","About &amp; support","Version, what syncs, who to call");
@@ -2722,6 +2934,24 @@ function vInfo(){
     'For anything else, talk to your lead.</div></div>';
   return h+'</div>';
 }
+/* Usage comes from the events collection: actual work recorded, not logins.
+   Someone can be signed in all week and never touch a point. */
+function usageStats(){
+  var now=Date.now(), out={};
+  Object.keys(TECHS).forEach(function(k){
+    out[k]={id:k,last:0,day:0,week:0,total:0,units:{}};
+  });
+  (S.log||[]).concat(S.queue).forEach(function(e){
+    var u=out[e.by];if(!u)return;
+    u.total++;
+    if(e.at>u.last)u.last=e.at;
+    if(now-e.at<86400000)u.day++;
+    if(now-e.at<7*86400000)u.week++;
+    if(e.unit)u.units[e.unit]=1;
+  });
+  return Object.keys(out).map(function(k){return out[k]})
+    .sort(function(a,b){return b.last-a.last});
+}
 function vAdmin(){
   var ids=Object.keys(TECHS);
   var h='<div class="bar"><button class="iconbtn" id="backmore2" aria-label="Back">‹</button>'+
@@ -2769,6 +2999,58 @@ function vAdmin(){
       esc(u.role)+' ▾</button></span></div>';
   });
   h+='<button class="ghost" id="adduser">+ Add a person</button></div>';
+  // --- who is actually using it ---
+  var usage=usageStats(), activeDay=usage.filter(function(u){return u.day>0}).length;
+  h+='<div class="card"><h3>Who is using this</h3>'+
+    '<div style="font-size:12.5px;color:var(--dim);margin-bottom:10px">'+
+    (S.log&&S.log.length
+      ? activeDay+' of '+usage.length+' recorded work in the last 24 hours'
+      : 'Open Recent changes once to load the activity log, then come back.')+
+    '</div>';
+  usage.forEach(function(u){
+    var t=TECHS[u.id];if(!t)return;
+    var fresh=u.last&&Date.now()-u.last<3600000;
+    var warm=!fresh&&u.last&&Date.now()-u.last<86400000;
+    var c=fresh?"var(--pass)":(warm?"var(--issue)":"var(--faint)");
+    var un=Object.keys(u.units);
+    h+='<div style="padding:10px 0;border-bottom:1px solid var(--edge)">'+
+      '<div style="display:flex;align-items:center;gap:9px">'+
+      '<span class="led" style="background:'+c+'"></span>'+
+      '<span style="flex:1;font-weight:600">'+esc(t.n)+
+      ' <span class="mono" style="color:var(--dim);font-weight:400">'+esc(t.i)+'</span></span>'+
+      '<span style="font-size:12px;color:'+c+';font-weight:600">'+esc(ago(u.last))+'</span></div>'+
+      '<div style="font-size:11.5px;color:var(--faint);margin-left:17px;margin-top:3px">'+
+      u.day+' today · '+u.week+' this week · '+u.total+' in the log'+
+      (un.length?' · '+esc(un.slice(0,3).join(", "))+(un.length>3?" +"+(un.length-3):""):"")+
+      '</div></div>';
+  });
+  h+='<div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.6">'+
+    'Counted from recorded work, not sign-ins. Someone can be logged in all week '+
+    'and never touch a point.</div></div>';
+
+  // --- the honest answer about addresses and devices ---
+  h+='<div class="card"><h3>IP addresses and devices</h3>'+
+    '<div style="font-size:13px;color:var(--dim);line-height:1.65">'+
+    'The app cannot see its own IP — a browser is not told its public address, '+
+    'so nothing here could report it honestly. Your server already logs it:'+
+    '<div style="margin:10px 0 0 0;color:var(--text)">'+
+    '<b>PocketBase</b> → <span class="mono">/_/</span> → Logs. Every request with IP, '+
+    'method, path and user agent. Filter by <span class="mono">auth-with-password</span> '+
+    'to see sign-ins.<br><br>'+
+    '<b>Cloudflare</b> → your domain → Analytics. Visitors, countries and bot traffic '+
+    'for anyone who loaded the page without signing in.</div>'+
+    '</div></div>';
+
+  h+='<div class="card"><h3>Demo users</h3>'+
+    '<div style="font-size:13px;color:var(--dim);line-height:1.65">'+
+    'Nothing to show here, and that is by design: the demo runs entirely on the '+
+    'visitor\u2019s phone and never calls your server. There is no account, no record '+
+    'and no data written.<br><br>'+
+    'What you can see is the page load itself, in Cloudflare Analytics or the '+
+    'nginx log. If you want demo sessions recorded in the app, that means logging '+
+    'visitors who never agreed to anything \u2014 say the word and I can add it, but it '+
+    'is a deliberate choice rather than an oversight.</div></div>';
+
   h+='<div class="card"><h3>Password resets</h3>'+
     '<div style="font-size:13px;color:var(--dim);line-height:1.6">'+
     'Tap a person above to send them a reset link or set a password directly. '+
@@ -2964,7 +3246,11 @@ function commit(v,advance){
 function doCommit(v,issue,advance){
   var pt=queue()[S.idx],d=S.draft;
   var wasId=pt.id;
-  var ev={id:uid(),projectId:S.proj,pointId:pt.id,tag:pt.tag,unit:pt.unit,status:v,
+  var ev={id:uid(),kind:"verdict",projectId:S.proj,pointId:pt.id,tag:pt.tag,unit:pt.unit,status:v,
+    // What this overwrote, so it can be put back without replaying history.
+    prev:{status:pt.status||null,by:pt.by||null,at:pt.at||null,
+          reading:pt.reading||null,checks:Object.assign({},pt.checks||{}),
+          notes:pt.notes||""},
     by:S.user.id,at:Date.now(),
     reading:isAnalog(pt.type)?{kind:"analog",found:d.found,bas:d.bas,tol:d.tol}
                              :{kind:"digital",cmd:d.cmd,obs:d.obs},
@@ -2998,7 +3284,9 @@ function massApply(){
   ids.forEach(function(id){
     var pt=p.points.filter(function(x){return x.id===id})[0];if(!pt)return;
     var ev={id:uid(),kind:"checks",projectId:S.proj,pointId:id,tag:pt.tag,unit:pt.unit,
-      checks:cmap,mode:S.massMode,by:S.user.id,at:Date.now()};
+      checks:cmap,mode:S.massMode,
+      prev:{checks:Object.assign({},pt.checks||{})},
+      by:S.user.id,at:Date.now()};
     applyEvent(ev);S.queue.push(ev);qAdd(ev);n++;
   });
   kvSet("projects",S.projects);
@@ -3149,6 +3437,21 @@ function bind(){
     S.authOk="Demo ended. Sign in to reach your real jobs.";
     render();
   });
+  on("backlog","click",function(){goBack(function(){S.screen="more";render()})});
+  all("[data-lf]",function(b){b.addEventListener("click",function(){
+    S.logFilter=b.dataset.lf;render()})});
+  all("[data-undo]",function(b){b.addEventListener("click",function(){
+    var id=b.dataset.undo;
+    var ev=S.queue.concat(S.log||[]).filter(function(e){return e.id===id})[0];
+    if(!ev||!canUndo(ev)){toast("Cannot undo that");return}
+    var u=buildUndo(ev);
+    if(!u){toast("Cannot undo that");return}
+    applyEvent(u);S.queue.push(u);qAdd(u);
+    ev.undone=true;
+    kvSet("projects",S.projects);
+    toast("Undone — the change and the undo are both on the record");
+    flush();render();
+  })});
   on("tohelp","click",function(){S._helpFrom=S.screen;S.screen="howto";render()});
   on("backhelp","click",function(){
     goBack(function(){S.screen=S._helpFrom||"projects";render()})});
@@ -3156,6 +3459,12 @@ function bind(){
   on("backmore2","click",function(){goBack(function(){S.screen="more";render()})});
   all("[data-go]",function(b){b.addEventListener("click",function(){
     var d=b.dataset.go;
+    if((d==="log"||d==="admin")&&LIVE&&S.proj&&online()){
+      S.logLoading=true;
+      pbLoadEvents(S.proj).then(function(evs){
+        S.log=evs;S.logLoading=false;render();
+      }).catch(function(){S.logLoading=false;render()});
+    }
     if(d==="device"){S._prev="more";S.screen="device"}else S.screen=d;
     render();
   })});
@@ -3348,6 +3657,34 @@ function bind(){
   on("pgo","click",doPrint);
   on("back4","click",function(){goBack(function(){S.screen="units";render()})});
   all("[data-df]",function(b){b.addEventListener("click",function(){S.defFilter=b.dataset.df;render()})});
+  on("defsel","click",function(){
+    S.defSel=!S.defSel;if(!S.defSel)S.defPick={};render();
+  });
+  on("defcancel","click",function(){S.defSel=false;S.defPick={};render()});
+  on("defpkg","click",function(){
+    S.modal={kind:"pkgpick",ids:Object.keys(S.defPick||{})};render();
+  });
+  all("[data-pkgadd]",function(b){b.addEventListener("click",function(){
+    var p=proj(),id=b.dataset.pkgadd;
+    var pk=packages(p).filter(function(k){return k.id===id})[0];
+    if(!pk)return;
+    var next=JSON.parse(JSON.stringify(pk));
+    next.issueIds=(next.issueIds||[]).slice();
+    S.modal.ids.forEach(function(x){if(next.issueIds.indexOf(x)<0)next.issueIds.push(x)});
+    var ev={id:uid(),kind:"package",projectId:S.proj,pkg:next,by:S.user.id,at:Date.now()};
+    applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
+    S.modal=null;S.defSel=false;S.defPick={};
+    toast("Added to "+next.name);flush();render();
+  })});
+  on("pkgnew","click",function(){
+    var ids=S.modal.ids,p=proj();
+    var us={};allIssues(p).forEach(function(x){if(ids.indexOf(x.id)>=0&&x.unit)us[x.unit]=1});
+    var un=Object.keys(us);
+    S.modal={kind:"assign",ids:[],issueIds:ids,who:null,
+      name:(un.length===1?un[0]+" — ":"")+ids.length+" defect"+(ids.length===1?"":"s")+" to fix",
+      due:"1",note:""};
+    render();
+  });
   on("deffil","click",function(){S.modal={kind:"deffilter"};render()});
   all("[data-dk]",function(b){b.addEventListener("click",function(){S.defKind=b.dataset.dk;render()})});
   all("[data-dsc]",function(b){b.addEventListener("click",function(){S.defScope=b.dataset.dsc;render()})});
@@ -3418,6 +3755,11 @@ function bind(){
   });
   all("[data-def]",function(b){b.addEventListener("click",function(){
     var key=b.dataset.def,p=proj();
+    if(S.defSel){
+      S.defPick=S.defPick||{};
+      if(S.defPick[key])delete S.defPick[key];else S.defPick[key]=true;
+      render();return;
+    }
     var rec=allIssues(p).filter(function(x){return x.id===key})[0];
     if(!rec)return;
     if(rec.scope!=="point"){S.modal={kind:"issuedetail",issueId:rec.issue.id};render();return}
@@ -3579,7 +3921,8 @@ function bind(){
     var note=(el("asnote")?el("asnote").value:"").trim();
     var due=m.due===""?null:Date.now()+parseInt(m.due,10)*86400000;
     var pk={id:"pk"+Date.now().toString(36),name:name,assignee:m.who,
-      by:S.user.id,at:Date.now(),due:due,note:note,pointIds:m.ids};
+      by:S.user.id,at:Date.now(),due:due,note:note,
+      pointIds:m.ids||[],issueIds:m.issueIds||[]};
     var ev={id:uid(),kind:"package",projectId:S.proj,pkg:pk,by:S.user.id,at:Date.now()};
     applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
     S.modal=null;S.selecting=false;S.sel={};
@@ -3593,6 +3936,18 @@ function bind(){
     var parts=b.dataset.pkg.split("|");
     S.proj=parts[0];S.pkg=parts[1];S.unit=null;S.filter="open";S.limit=60;
     S.selecting=false;S.sel={};S._prev="work";S.screen="points";render();
+  })});
+  all("[data-pkgiss]",function(b){b.addEventListener("click",function(){
+    var key=b.dataset.pkgiss,p=proj();
+    var rec=allIssues(p).filter(function(x){return x.id===key})[0];
+    if(!rec)return;
+    if(rec.scope!=="point"){S.modal={kind:"issuedetail",issueId:rec.issue.id};render();return}
+    // A point defect is retested on the point itself, so go there.
+    var pt=rec.point;
+    S.unit=pt.unit;S.filter="all";S.limit=60;S._prev="points";
+    var list=queue();
+    for(var i=0;i<list.length;i++)if(list[i].id===pt.id){S.idx=i;break}
+    loadDraft();S.screen="verify";render();
   })});
   on("leavepkg","click",function(){S.pkg=null;S.screen="units";render()});
 
@@ -3613,7 +3968,7 @@ function bind(){
     var v=S.draft.life===b.dataset.life?null:b.dataset.life;
     S.draft.life=v;
     var ev={id:uid(),kind:"life",projectId:S.proj,pointId:pt.id,tag:pt.tag,unit:pt.unit,
-      status:v,by:S.user.id,at:Date.now()};
+      status:v,prev:{status:pt.status||null},by:S.user.id,at:Date.now()};
     applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
     render();flush();
   })});
@@ -3632,7 +3987,7 @@ function bind(){
     var v=e.target.value.trim();
     if(v===pt.addr)return;
     var ev={id:uid(),kind:"edit",projectId:S.proj,pointId:pt.id,tag:pt.tag,unit:pt.unit,
-      field:"addr",value:v,by:S.user.id,at:Date.now()};
+      field:"addr",value:v,prev:{value:pt.addr||""},by:S.user.id,at:Date.now()};
     applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
     toast("Address saved as "+(v||"blank"));flush();
   });
@@ -3690,7 +4045,9 @@ function bind(){
   });
   function setDeleted(pt,on,reason){
     var ev={id:uid(),kind:"delete",projectId:S.proj,pointId:pt.id,tag:pt.tag,
-      unit:pt.unit,deleted:on,reason:reason||"",by:S.user.id,at:Date.now()};
+      unit:pt.unit,deleted:on,reason:reason||"",
+      prev:{deleted:!!pt.deleted,reason:pt.deleteReason||""},
+      by:S.user.id,at:Date.now()};
     applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);flush();
   }
   on("delgo","click",function(){
