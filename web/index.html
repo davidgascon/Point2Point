@@ -337,7 +337,7 @@ section.blk{padding:16px;border-bottom:1px solid var(--edge)}
 
 .dock{position:sticky;bottom:0;z-index:20;background:var(--panel);border-top:1px solid var(--edge);
   padding:11px 14px calc(11px + env(safe-area-inset-bottom, 0px));box-shadow:0 -8px 24px var(--shadow)}
-.verdicts{display:grid;grid-template-columns:1fr 1fr 1.15fr 1.15fr;gap:6px}
+.verdicts{display:grid;grid-template-columns:1fr 1.2fr 1.2fr;gap:7px}
 .vb{min-height:62px;border-radius:12px;font-weight:700;font-size:15px;color:#0B1013;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
   padding:0 2px;text-align:center}
@@ -514,7 +514,11 @@ function buildDemo(){
         "Need written direction on lead/lag before startup.",
       party:"Engineering",priority:"Medium",hours:"",blocks:false,photos:[],
       at:now-3*day,by:"demo_ms",resolved:false}],
-    packages:[],members:["demo_dg","demo_jr","demo_ms"]}];
+    packages:[{id:"demo_pk1",name:"VAV-12 — finish and retest",
+      assignee:"demo_jr",by:"demo_dg",at:now-day,due:now+2*day,
+      note:"Flow issue needs the ceiling opened.",
+      pointIds:[],issueIds:["demo_i1"]}],
+    members:["demo_dg","demo_jr","demo_ms"]}];
 }
 var SERVER_PROJECTS=buildDemo();
 
@@ -689,6 +693,12 @@ function pbApplyServerSide(ev,p,pt){
               checks:pt.checks,notes:ev.notes||pt.notes||""}}
   var q=pb.collection("points").update(pt.pbId,patch,{requestKey:null});
   if(ev.issue)q=q.then(function(){return pbSaveIssue(p,ev.issue,pt)});
+  else if(ev.resolveIssue&&pt.issue&&(pt.issue.pbId||pt.issue.id))
+    q=q.then(function(){
+      return pb.collection("issues").update(pt.issue.pbId||pt.issue.id,
+        {resolved:true,resolved_by:ev.by,resolved_at:ev.at},{requestKey:null})
+        .catch(function(){/* the verdict is what matters; the log can be fixed */});
+    });
   return q;
 }
 function pbSaveIssue(p,iss,pt){
@@ -812,11 +822,14 @@ var S={screen:"signin",user:null,proj:null,unit:null,q:"",filter:"open",idx:0,
   modal:null,defFilter:"open",defParty:"any",defPrio:"any",defKind:"any",defScope:"any",
   printOpts:{status:"open",prio:"any",party:"any",unit:"any",kind:"any",notes:true},
   sort:"sheet",pkg:null,pkgFilter:"mine",loadErr:null,defSel:false,defPick:{},
-  log:[],logFilter:"mine",logLoading:false,
+  log:[],logFilter:"mine",logLoading:false,taskDraft:"",taskFocus:false,
   authMode:"signin",authErr:null,authOk:null,authEmail:"",suName:"",suInit:"",suEmail:"",
   prefs:{openLife:false,openReading:false,openChecks:true,openNotes:false,
          confirmPass:true,tolAI:"2",tolAO:"3"}};
-var LIFE=["Installed","Wired"],VERDICT=["Pass","Fail","Issue"];
+var LIFE=["Installed","Wired"];
+/* Only two outcomes now. "Issue" used to be a third verdict that also produced
+   a defect, which meant two words for one thing; old records still render. */
+var VERDICT=["Pass","Fail"];
 var CHECKS=["Trends","Alarm","Graphic","Startup"];
 var CKLAB={Trends:"Trend / history",Alarm:"Alarm",Graphic:"Graphic",Startup:"Startup date"};
 var PARTIES=["Controls","Electrical","Mechanical","TAB","Engineering","Other"];
@@ -952,6 +965,45 @@ function ago(ms){
   var hr=Math.round(mn/60); if(hr<24)return hr+" hr ago";
   return Math.round(hr/24)+" days ago";
 }
+/* Adding to a package is a second event on purpose: the defect is saved even
+   if the package write fails, rather than losing the whole thing. */
+/* Make the package the form asked for, if it asked for a new one, and return
+   its id so the defect can be dropped straight into it. */
+function makePackageFromForm(m){
+  if(!m||!m.newPkg)return null;
+  var nm=(el("npkgname")?el("npkgname").value:(m.newPkgName||"")).trim()
+    ||"Defects to fix";
+  var pk={id:"pk"+Date.now().toString(36),name:nm,
+    assignee:m.newPkgWho||S.user.id,by:S.user.id,at:Date.now(),
+    due:null,note:"",pointIds:[],issueIds:[],tasks:[]};
+  var ev={id:uid(),kind:"package",projectId:S.proj,pkg:pk,by:S.user.id,at:Date.now()};
+  applyEvent(ev);S.queue.push(ev);qAdd(ev);
+  return pk.id;
+}
+/* Any package edit goes through here so the whole object is written once and
+   the queue/offline path is identical for tasks, defects and points. */
+function savePackage(next){
+  var ev={id:uid(),kind:"package",projectId:S.proj,pkg:next,by:S.user.id,at:Date.now()};
+  applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
+  flush();
+  return next;
+}
+function pkgClone(p,id){
+  var pk=packages(p).filter(function(k){return k.id===id})[0];
+  return pk?JSON.parse(JSON.stringify(pk)):null;
+}
+function addToPackage(pkgId,issueKey){
+  if(!pkgId)return;
+  var p=proj();if(!p)return;
+  var pk=packages(p).filter(function(k){return k.id===pkgId})[0];
+  if(!pk)return;
+  var next=JSON.parse(JSON.stringify(pk));
+  next.issueIds=(next.issueIds||[]).slice();
+  if(next.issueIds.indexOf(issueKey)<0)next.issueIds.push(issueKey);
+  var ev={id:uid(),kind:"package",projectId:p.id,pkg:next,by:S.user.id,at:Date.now()};
+  applyEvent(ev);S.queue.push(ev);qAdd(ev);
+  return next.name;
+}
 function newIssueId(){return "i"+Date.now().toString(36)+Math.random().toString(36).slice(2,6)}
 var PRIOS=["Low","Medium","High"];
 function prioColor(p){return p==="High"?"var(--fail)":(p==="Medium"?"var(--issue)":"var(--wired)")}
@@ -1042,7 +1094,8 @@ function applyEvent(ev,projects){
   if(ev.checks)pt.checks=ev.checks;
   if(ev.notes!==undefined)pt.notes=ev.notes;
   if(ev.issue)pt.issue=Object.assign({},ev.issue,{at:ev.at,by:ev.by,resolved:false});
-  else if(ev.status==="Pass"&&pt.issue&&!pt.issue.resolved)
+  else if(ev.resolveIssue&&pt.issue&&!pt.issue.resolved)
+    // Closed because the person passing it said so, not as a side effect.
     pt.issue=Object.assign({},pt.issue,{resolved:true,resolvedBy:ev.by,resolvedAt:ev.at});
   return pt;
 }
@@ -1225,6 +1278,8 @@ function pkgIssues(p,pk){
 /* Which unit a package belongs to, for grouping. A package built from one
    controller names it; a mixed one says so rather than guessing. */
 function pkgUnit(p,pk){
+  if(!pk.assignee&&!(pk.pointIds||[]).length&&!(pk.issueIds||[]).length)
+    return "Not assigned yet";
   var us={};
   pkgPoints(p,pk).forEach(function(x){if(x.unit)us[x.unit]=1});
   pkgIssues(p,pk).forEach(function(x){if(x.unit)us[x.unit]=1});
@@ -1240,13 +1295,18 @@ function pkgStats(p,pk){
   var pts=pkgPoints(p,pk),done=pts.filter(function(x){
     return["Pass","Fail","Issue"].indexOf(x.status)>=0||x.p2pNA}).length;
   var iss=pkgIssues(p,pk),fixed=iss.filter(function(x){return x.issue.resolved}).length;
-  var total=pts.length+iss.length, settled=done+fixed;
+  var tk=pk.tasks||[],tdone=tk.filter(function(t){return t.done}).length;
+  var total=pts.length+iss.length+tk.length, settled=done+fixed+tdone;
   return{total:total,done:settled,left:total-settled,
     points:pts.length,issues:iss.length,issuesOpen:iss.length-fixed,
+    tasks:tk.length,tasksOpen:tk.length-tdone,
     pct:total?Math.round(settled/total*100):0};
 }
 function myPackages(p){
-  return packages(p).filter(function(k){return k.assignee===S.user.id});
+  // Unassigned packages show to everyone: that is the point of jotting a list
+  // before deciding who takes it.
+  return packages(p).filter(function(k){
+    return k.assignee===S.user.id||!k.assignee});
 }
 function openPkgCount(){
   var n=0;
@@ -1465,6 +1525,7 @@ function render(){
       requestAnimationFrame(function(){window.scrollTo(0,want)});
     });
   }
+  if(S.taskFocus){S.taskFocus=false;var nt=el("newtask");if(nt)nt.focus()}
   var bar=document.querySelector(".bar");
   if(bar)document.documentElement.style.setProperty("--barh",bar.offsetHeight+"px");
   navSync();
@@ -1671,7 +1732,28 @@ function vPoints(){
     if(pk){var pz=pkgStats(p,pk);
       h+='<div class="pkgbar"><span><b>'+esc(pk.name)+'</b> — '+pz.done+' of '+pz.total+' done'+
         (pk.due?' · '+esc(dueLabel(pk.due)):'')+'</span>'+
+        '<button id="editpkg">Edit</button>'+
         '<button id="leavepkg">Leave</button></div>';
+      var tks=pk.tasks||[];
+      h+='<div class="subhd" style="display:flex;align-items:center;gap:8px">'+
+        '<span style="flex:1">Tasks'+(tks.length?' · '+tks.filter(function(t){return t.done}).length+
+        ' of '+tks.length+' done':'')+'</span></div>';
+      tks.forEach(function(t,ti){
+        var w=TECHS[t.doneBy];
+        h+='<button class="pt" data-task="'+ti+'" style="min-height:58px">'+
+          '<span class="selbox'+(t.done?" on":"")+'" style="flex:none">'+(t.done?"✓":"")+'</span>'+
+          '<span class="grow"><span style="font-size:14.5px;'+
+          (t.done?'text-decoration:line-through;opacity:.55':'font-weight:500')+'">'+
+          esc(t.text)+'</span>'+
+          (t.done&&w?'<div class="who">done by '+esc(w.n.split(" ")[0])+'</div>':'')+'</span>'+
+          '<span class="iconbtn" data-rmtask="'+ti+'" style="flex:none;color:var(--faint)">\u00d7</span>'+
+          '</button>';
+      });
+      h+='<div style="display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--edge)">'+
+        '<input id="newtask" placeholder="Add a task — pick up parts, meet the electrician…" '+
+        'value="'+esc(S.taskDraft||"")+'" style="flex:1"/>'+
+        '<button class="chip" id="addtask" style="flex:none;background:var(--accent);'+
+        'color:#14100C;border-color:var(--accent)">Add</button></div>';
       var pkIss=pkgIssues(p,pk).filter(function(x){return!x.issue.resolved});
       if(pkIss.length){
         h+='<div class="subhd" style="color:var(--fail)">'+pkIss.length+
@@ -1685,6 +1767,8 @@ function vPoints(){
             '<span style="color:var(--dim)">'+esc(i.desc||"")+'</span></span>'+
             '<span style="color:var(--faint)">›</span></button>';
         });
+        h+='<div class="subhd">Points in this package</div>';
+      }else if(tks.length||pkgPoints(p,pk).length){
         h+='<div class="subhd">Points in this package</div>';
       }
     }
@@ -1911,8 +1995,7 @@ function vVerify(){
     '<button id="prev"'+(S.idx===0?" disabled":"")+'>‹ Back</button>'+
     '<span>'+esc(S.user.i)+'</span>'+
     '<button id="skip"'+(S.idx>=list.length-1?" disabled":"")+'>Skip ›</button></div><div class="verdicts">'+
-    [["Issue","Issue","LOGS DEFECT",""],
-     ["Fail","Fail","LOGS DEFECT",""],
+    [["Fail","Fail","LOGS A DEFECT",""],
      ["Pass","Pass","AND CLOSE",""],
      ["Pass","Pass","AND NEXT","1"]].map(function(b){
       return'<button class="vb" data-v="'+b[0]+'" data-adv="'+b[3]+'" '+
@@ -2058,6 +2141,32 @@ function vModal(){
       '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button></div>'+
       '</div></div>';
   }
+  if(m.kind==="passdefect"){
+    var pdPt=queue()[S.idx], pdI=pdPt&&pdPt.issue;
+    if(!pdI)return "";
+    return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
+      '<h2>This point has an open defect</h2>'+
+      '<div class="sh">You are about to pass <span class="mono">'+esc(m.tag)+'</span>, '+
+      'but there is a defect on it that nobody has closed.</div>'+
+      '<div style="border:1px solid '+kindColor(pdI.kind)+';border-radius:11px;padding:12px;'+
+      'background:rgba(244,82,77,.08)">'+
+      '<div class="defhd"><span class="kind" style="background:'+kindColor(pdI.kind)+'">'+
+      esc((pdI.kind||"Defect").toUpperCase())+'</span>'+
+      '<span class="pill">'+esc(pdI.party||"")+'</span>'+
+      (pdI.blocks?'<span class="blocks">BLOCKS</span>':'')+'</div>'+
+      '<div style="font-size:13.5px;margin-top:7px">'+esc(pdI.desc||"")+'</div>'+
+      '<div style="font-size:11.5px;color:var(--faint);margin-top:7px">Logged by '+
+      (TECHS[pdI.by]?esc(TECHS[pdI.by].n):"—")+
+      (pdI.at?" on "+new Date(pdI.at).toLocaleDateString():"")+'</div></div>'+
+      '<div style="font-size:12.5px;color:var(--dim);margin-top:14px;line-height:1.6">'+
+      'If you retested it and it works now, close it. If someone else still has to '+
+      'come back — a part on order, another trade — pass the point and leave the '+
+      'defect open so it stays on the punch list.</div>'+
+      '<button class="big" id="pdclose" style="margin-top:14px">Pass and close the defect</button>'+
+      '<button class="ghost" id="pdkeep">Pass, leave the defect open</button>'+
+      '<button class="ghost" id="mcancel">Go back</button>'+
+      '</div></div>';
+  }
   if(m.kind==="confirmpass"){
     var cpPt=queue()[S.idx],cpD=S.draft||{};
     return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
@@ -2125,7 +2234,7 @@ function vModal(){
       '<div class="sh">Something on the panel that is not on the sheet, or a problem to record.</div>'+
       '<button class="sortrow" id="wantpoint">Add a point to this controller'+
       '<span style="margin-left:auto;color:var(--faint)">›</span></button>'+
-      '<button class="sortrow" id="wantissue">Log an issue'+
+      '<button class="sortrow" id="wantissue">Log a defect'+
       '<span style="margin-left:auto;color:var(--faint)">›</span></button>'+
       '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button></div>'+
       '</div></div>';
@@ -2157,12 +2266,22 @@ function vModal(){
       '</div></div></div>';
   }
   if(m.kind==="assign"){
-    var n=m.ids.length;
+    var n=(m.ids||[]).length, nIss=(m.issueIds||[]).length;
+    var editing=!!m.editId;
     return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
-      '<h2>Assign '+n+' point'+(n===1?"":"s")+'</h2>'+
-      '<div class="sh">They get it as a package with its own progress. It does not lock anyone else out.</div>'+
+      '<h2>'+(editing?"Edit this package":
+        (n||nIss?"Assign "+(n?n+" point"+(n===1?"":"s"):"")+
+          (n&&nIss?" and ":"")+(nIss?nIss+" defect"+(nIss===1?"":"s"):"")
+        :"New work package"))+'</h2>'+
+      '<div class="sh">'+(editing
+        ?"Change who has it, when it is due, or add more tasks."
+        :"Write the list now and decide who takes it later — a package with "+
+         "nobody on it shows up for everyone until someone is put on it.")+'</div>'+
       '<div class="lb">Who</div><div class="segwrap">'+
-      Object.keys(TECHS).map(function(k){var on=m.who===k;
+      '<button data-asu="" aria-pressed="'+(!m.who)+'" style="'+
+      (!m.who?"background:var(--edge)":"")+'">Nobody yet</button>'+
+      Object.keys(TECHS).filter(function(k){return TECHS[k].active!==false})
+      .map(function(k){var on=m.who===k;
         return'<button data-asu="'+k+'" aria-pressed="'+on+'" style="'+
           (on?"background:var(--wired)":"")+'">'+esc(TECHS[k].i)+' '+esc(TECHS[k].n.split(" ")[0])+'</button>'
       }).join("")+'</div>'+
@@ -2175,8 +2294,11 @@ function vModal(){
           (on?"background:var(--wired)":"")+'">'+d[1]+'</button>'}).join("")+'</div>'+
       '<div class="lb">Note (optional)</div>'+
       '<textarea id="asnote" rows="2" placeholder="Anything they need to know before they go">'+esc(m.note||"")+'</textarea>'+
+      '<div class="lb">Tasks (optional, one per line)</div>'+
+      '<textarea id="astasks" rows="3" placeholder="Pick up the replacement sensor&#10;Meet the electrician at 9&#10;Label the panel">'+esc(m.tasks||"")+'</textarea>'+
       '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button>'+
-      '<button id="asgo" style="background:var(--wired);color:#0B1013"'+(m.who?"":" disabled")+'>Send it</button>'+
+      '<button id="asgo" style="background:var(--wired);color:#0B1013">'+
+      (editing?"Save changes":(m.who?"Send it":"Create it"))+'</button>'+
       '</div></div></div>';
   }
   if(m.kind==="share"){
@@ -2262,7 +2384,7 @@ function issueForm(m){
   var kind=m.ikind||"Defect";
   var photos=m.photos||[];
   var h='<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
-    '<h2>'+(standalone?"Log an issue":"Log this "+(m.verdict==="Fail"?"failure":"issue"))+'</h2>';
+    '<h2>'+(standalone?"Log a defect":"Log this defect")+'</h2>';
   if(standalone){
     h+='<div class="sh">Anything that is not a single point — a drawing error, a missing part, a whole unit.</div>'+
       '<div class="lb">What does it affect</div><div class="segwrap">'+
@@ -2307,6 +2429,33 @@ function issueForm(m){
        '<div class="hoursbox"><input id="ihrs" inputmode="decimal" value="'+esc(m.hours||"")+'" placeholder="0"/>'+
        '<span>'+(kind==="Rework"?"Rework from someone else\'s error is usually billable — capture it now or it is gone.":"Leave blank if it was quick.")+'</span></div>'
       :'')+
+    (function(){
+      var pk=packages(proj());
+      var h2='<div class="lb">Add to a work package (optional)</div><div class="segwrap">'+
+        '<button data-ipkg="" aria-pressed="'+(!m.pkgId&&!m.newPkg)+'" style="'+
+        (!m.pkgId&&!m.newPkg?"background:var(--edge)":"")+'">None</button>'+
+        pk.map(function(k){
+          return'<button data-ipkg="'+esc(k.id)+'" aria-pressed="'+(m.pkgId===k.id)+'" style="'+
+            (m.pkgId===k.id?"background:var(--wired)":"")+'">'+esc(k.name)+'</button>'
+        }).join("")+
+        '<button data-ipkg="__new" aria-pressed="'+(!!m.newPkg)+'" style="'+
+        (m.newPkg?"background:var(--accent);color:#14100C":"")+'">+ New package</button>'+
+        '</div>';
+      if(m.newPkg){
+        h2+='<input id="npkgname" placeholder="Call it something" value="'+
+          esc(m.newPkgName||"")+'" style="margin-top:8px"/>'+
+          '<div class="segwrap" style="margin-top:8px">'+
+          Object.keys(TECHS).filter(function(k){return TECHS[k].active!==false})
+          .map(function(k){
+            var on=(m.newPkgWho||S.user.id)===k;
+            return'<button data-npkgwho="'+k+'" aria-pressed="'+on+'" style="'+
+              (on?"background:var(--wired)":"")+'">'+esc(TECHS[k].i)+'</button>'
+          }).join("")+'</div>'+
+          '<div style="font-size:11.5px;color:var(--faint);margin-top:6px">'+
+          'Created when you save this defect, with the defect already in it.</div>';
+      }
+      return h2;
+    })()+
     '<div class="switch"><div><div class="lab">Blocks checkout</div>'+
     '<div class="hint">Shows on the unit so nobody wastes a trip</div></div>'+
     '<button class="tgl" id="iblock" aria-pressed="'+(!!m.blocks)+'" aria-label="Blocks checkout"><i></i></button></div>'+
@@ -2456,7 +2605,7 @@ function vIssues(){
     '<button class="iconbtn" id="toprint" aria-label="Print defect log">⎙</button>'+
     '<button class="iconbtn" id="defsel" aria-label="Select defects"'+
     (S.defSel?' style="color:var(--accent)"':'')+'>☑</button>'+
-    '<button class="iconbtn" id="logiss" aria-label="Log a new issue">＋</button>'+
+    '<button class="iconbtn" id="logiss" aria-label="Log a new defect">＋</button>'+
     homeBtn()+gearBtn()+'</div>'+strip();
   h+='<div class="chips">'+f.map(function(x){
     return'<button class="chip" data-df="'+x[0]+'" aria-pressed="'+(S.defFilter===x[0])+'">'+x[1]+' <b>'+x[2]+'</b></button>'
@@ -2675,6 +2824,8 @@ function vWork(){
   var h='<div class="bar"><button class="iconbtn" id="backmore" aria-label="Back">‹</button>'+
     '<h1>Work packages<span class="sub">'+(mine?"assigned to you":"everyone on this job")+'</span></h1>'+
     planeBtn()+homeBtn()+'</div>'+strip();
+  h+='<div style="padding:12px 14px 0">'+
+    '<button class="big" id="newpkg">+ New work package</button></div>';
   if(isLead()){
     h+='<div class="chips">'+[["mine","Mine"],["all","Everyone"]].map(function(f){
       return'<button class="chip" data-pf="'+f[0]+'" aria-pressed="'+(S.pkgFilter===f[0])+'">'+f[1]+'</button>'
@@ -2716,6 +2867,8 @@ function vWork(){
         '<div class="mt">'+z.done+' of '+z.total+' done'+
         (z.issues?' · '+z.issues+' defect'+(z.issues===1?"":"s")+
           (z.issuesOpen?' ('+z.issuesOpen+' open)':''):'')+
+        (z.tasks?' · '+z.tasks+' task'+(z.tasks===1?"":"s")+
+          (z.tasksOpen?' ('+z.tasksOpen+' left)':''):'')+
         (who?' · '+esc(who.n):'')+
         (k.note?' · '+esc(k.note):'')+'</div>'+
         '<div class="bar2"><i style="width:'+z.pct+'%"></i></div></button>';
@@ -3226,6 +3379,13 @@ function loadDraft(){
 }
 function commit(v,advance){
   var pt=queue()[S.idx];
+  // An open defect on the point being passed is a real question, so it takes
+  // precedence over the generic confirm — two sheets in a row would just get
+  // tapped through.
+  if(v==="Pass"&&pt.issue&&!pt.issue.resolved){
+    S.modal={kind:"passdefect",advance:!!advance,pointId:pt.id,tag:pt.tag};
+    render();return;
+  }
   if(v==="Pass"&&S.prefs.confirmPass){
     S.modal={kind:"confirmpass",advance:!!advance,pointId:pt.id,tag:pt.tag,
       desc:pt.desc,why:false};
@@ -3243,7 +3403,7 @@ function commit(v,advance){
   }
   doCommit(v,null,advance);
 }
-function doCommit(v,issue,advance){
+function doCommit(v,issue,advance,resolveIssue){
   var pt=queue()[S.idx],d=S.draft;
   var wasId=pt.id;
   var ev={id:uid(),kind:"verdict",projectId:S.proj,pointId:pt.id,tag:pt.tag,unit:pt.unit,status:v,
@@ -3255,7 +3415,7 @@ function doCommit(v,issue,advance){
     reading:isAnalog(pt.type)?{kind:"analog",found:d.found,bas:d.bas,tol:d.tol}
                              :{kind:"digital",cmd:d.cmd,obs:d.obs},
     checks:Object.assign({},d.checks),notes:issue?issue.desc:d.notes,
-    issue:issue};
+    issue:issue,resolveIssue:!!resolveIssue};
   applyEvent(ev);S.queue.push(ev);claimUnit();
   qAdd(ev);kvSet("projects",S.projects);
   var msg=online()?(v==="Pass"?"Passed "+pt.tag:v+" logged on "+pt.tag)
@@ -3834,6 +3994,26 @@ function bind(){
     var d=el("mdesc");if(d)S.modal.desc=d.value;
     var hh=el("ihrs");if(hh)S.modal.hours=hh.value;
   }
+  all("[data-ipkg]",function(b){b.addEventListener("click",function(){
+    grabForm();
+    var v=b.dataset.ipkg;
+    if(v==="__new"){
+      S.modal.newPkg=!S.modal.newPkg;
+      S.modal.pkgId=null;
+      if(S.modal.newPkg&&!S.modal.newPkgName)
+        S.modal.newPkgName=(S.modal.unit||S.unit||"")
+          ? (S.modal.unit||S.unit)+" — defects to fix" : "Defects to fix";
+    }else{
+      S.modal.newPkg=false;S.modal.pkgId=v||null;
+    }
+    render();
+  })});
+  on("npkgname","input",function(e){S.modal.newPkgName=e.target.value});
+  all("[data-npkgwho]",function(b){b.addEventListener("click",function(){
+    grabForm();
+    var nm=el("npkgname");if(nm)S.modal.newPkgName=nm.value;
+    S.modal.newPkgWho=b.dataset.npkgwho;render();
+  })});
   all("[data-ik]",function(b){b.addEventListener("click",function(){
     grabForm();S.modal.ikind=b.dataset.ik;
     if(b.dataset.ik==="Rework"&&S.modal.party==="Controls")S.modal.party="Engineering";
@@ -3863,8 +4043,11 @@ function bind(){
       hours:m.hours||"",blocks:!!m.blocks,photos:(m.photos||[]).slice(),
       at:Date.now(),by:S.user.id,resolved:false};
     var ev={id:uid(),kind:"issue",projectId:S.proj,issue:iss,by:S.user.id,at:Date.now()};
-    applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
-    S.modal=null;toast("Issue logged");flush();
+    applyEvent(ev);S.queue.push(ev);qAdd(ev);
+    var pkName=addToPackage(m.pkgId||makePackageFromForm(m),iss.id);
+    kvSet("projects",S.projects);
+    S.modal=null;
+    toast("Defect logged"+(pkName?" and added to "+pkName:""));flush();
   });
   on("mcancel","click",function(){goBack(function(){S.modal=null;render()})});
   on("ovl","click",function(e){
@@ -3880,11 +4063,15 @@ function bind(){
     var m=S.modal;
     if(!m.desc.trim()){toast("Say what is wrong first");if(d)d.focus();return}
     S.draft.notes=m.desc;
-    var v=m.verdict;
+    var v=m.verdict, ptId=m.pointId;
+    var pkId=m.pkgId||makePackageFromForm(m);
     S.modal=null;
     doCommit(v,{desc:m.desc.trim(),party:m.party,priority:m.priority,
       kind:m.ikind||"Defect",hours:m.hours||"",blocks:!!m.blocks,
       photos:(m.photos||[]).slice(),scope:"point"},false);
+    // allIssues() keys a point defect as "p" + the point id.
+    var pkName=addToPackage(pkId,"p"+ptId);
+    if(pkName){kvSet("projects",S.projects);toast("Added to "+pkName);flush()}
   });
 
   on("sel","click",function(){S.selecting=true;S.sel={};render()});
@@ -3900,6 +4087,19 @@ function bind(){
   on("apply","click",massApply);
   on("assign","click",function(){
     var ids=Object.keys(S.sel).map(Number);if(!ids.length)return;
+    if(S.pkg){
+      // Working inside a package: selected points join it rather than
+      // starting a competing one.
+      var cur=pkgClone(proj(),S.pkg);
+      if(cur){
+        cur.pointIds=(cur.pointIds||[]).concat(ids.filter(function(x){
+          return (cur.pointIds||[]).indexOf(x)<0}));
+        savePackage(cur);
+        S.selecting=false;S.sel={};
+        toast(ids.length+" point"+(ids.length===1?"":"s")+" added to "+cur.name);
+        render();return;
+      }
+    }
     var p=proj(),pts=p.points.filter(function(x){return ids.indexOf(x.id)>=0});
     var us={};pts.forEach(function(x){us[x.unit]=1});
     var unames=Object.keys(us);
@@ -3907,35 +4107,95 @@ function bind(){
       :ids.length+" points across "+unames.length+" units";
     S.modal={kind:"assign",ids:ids,who:null,name:name,due:"1",note:""};render();
   });
+  function grabAssign(){
+    var nm=el("asname");if(nm)S.modal.name=nm.value;
+    var nt=el("asnote");if(nt)S.modal.note=nt.value;
+    var tk=el("astasks");if(tk)S.modal.tasks=tk.value;
+  }
   all("[data-asu]",function(b){b.addEventListener("click",function(){
-    var nm=el("asname");if(nm)S.modal.name=nm.value;
-    var nt=el("asnote");if(nt)S.modal.note=nt.value;
-    S.modal.who=b.dataset.asu;render()})});
+    grabAssign();S.modal.who=b.dataset.asu||null;render()})});
   all("[data-asd]",function(b){b.addEventListener("click",function(){
-    var nm=el("asname");if(nm)S.modal.name=nm.value;
-    var nt=el("asnote");if(nt)S.modal.note=nt.value;
-    S.modal.due=b.dataset.asd;render()})});
+    grabAssign();S.modal.due=b.dataset.asd;render()})});
   on("asgo","click",function(){
     var m=S.modal,p=proj();
-    var name=(el("asname")?el("asname").value:m.name).trim()||m.name;
+    var name=(el("asname")?el("asname").value:m.name||"").trim()||m.name||"Work package";
     var note=(el("asnote")?el("asnote").value:"").trim();
-    var due=m.due===""?null:Date.now()+parseInt(m.due,10)*86400000;
-    var pk={id:"pk"+Date.now().toString(36),name:name,assignee:m.who,
-      by:S.user.id,at:Date.now(),due:due,note:note,
-      pointIds:m.ids||[],issueIds:m.issueIds||[]};
-    var ev={id:uid(),kind:"package",projectId:S.proj,pkg:pk,by:S.user.id,at:Date.now()};
-    applyEvent(ev);S.queue.push(ev);qAdd(ev);kvSet("projects",S.projects);
+    var due=(m.due===""||m.due==null)?null:Date.now()+parseInt(m.due,10)*86400000;
+    var rawTasks=(el("astasks")?el("astasks").value:"").split("\n")
+      .map(function(s){return s.trim()}).filter(Boolean);
+    var newTasks=rawTasks.map(function(t){
+      return{id:uid(),text:t,done:false,by:S.user.id,at:Date.now()}});
+
+    var pk;
+    if(m.editId){
+      // Editing keeps everything already in the package and appends.
+      pk=pkgClone(p,m.editId);
+      if(!pk){S.modal=null;render();return}
+      pk.name=name;pk.assignee=m.who||null;pk.note=note;
+      if(m.due!==undefined&&m.due!==null)pk.due=due;
+      pk.tasks=(pk.tasks||[]).concat(newTasks);
+      pk.pointIds=(pk.pointIds||[]).concat((m.ids||[]).filter(function(x){
+        return (pk.pointIds||[]).indexOf(x)<0}));
+      pk.issueIds=(pk.issueIds||[]).concat((m.issueIds||[]).filter(function(x){
+        return (pk.issueIds||[]).indexOf(x)<0}));
+    }else{
+      pk={id:"pk"+Date.now().toString(36),name:name,assignee:m.who||null,
+        by:S.user.id,at:Date.now(),due:due,note:note,
+        pointIds:m.ids||[],issueIds:m.issueIds||[],tasks:newTasks};
+    }
+    savePackage(pk);
     S.modal=null;S.selecting=false;S.sel={};
-    toast("Sent to "+TECHS[m.who].n.split(" ")[0]);flush();
+    toast(m.editId?"Package updated"
+      :(m.who?"Sent to "+TECHS[m.who].n.split(" ")[0]:"Package created — nobody on it yet"));
   });
 
   /* ---- packages ---- */
   on("towork","click",function(){S.screen="work";render()});
+  on("newpkg","click",function(){
+    S.modal={kind:"assign",ids:[],issueIds:[],who:null,
+      name:"",due:"",note:"",tasks:""};
+    render();
+  });
+  on("editpkg","click",function(){
+    var p=proj(),pk=packages(p).filter(function(k){return k.id===S.pkg})[0];
+    if(!pk)return;
+    S.modal={kind:"assign",editId:pk.id,ids:[],issueIds:[],who:pk.assignee||null,
+      name:pk.name,due:null,note:pk.note||"",tasks:""};
+    render();
+  });
   all("[data-pf]",function(b){b.addEventListener("click",function(){S.pkgFilter=b.dataset.pf;render()})});
   all("[data-pkg]",function(b){b.addEventListener("click",function(){
     var parts=b.dataset.pkg.split("|");
     S.proj=parts[0];S.pkg=parts[1];S.unit=null;S.filter="open";S.limit=60;
     S.selecting=false;S.sel={};S._prev="work";S.screen="points";render();
+  })});
+  on("newtask","input",function(e){S.taskDraft=e.target.value});
+  function commitTask(){
+    var txt=(el("newtask")?el("newtask").value:"").trim();
+    if(!txt)return;
+    var next=pkgClone(proj(),S.pkg);if(!next)return;
+    next.tasks=(next.tasks||[]).concat([{id:uid(),text:txt,done:false,
+      by:S.user.id,at:Date.now()}]);
+    S.taskDraft="";S.taskFocus=true;
+    savePackage(next);
+    render();
+  }
+  on("addtask","click",commitTask);
+  on("newtask","keydown",function(e){if(e.key==="Enter"){e.preventDefault();commitTask()}});
+  all("[data-task]",function(b){b.addEventListener("click",function(e){
+    if(e.target&&e.target.getAttribute("data-rmtask")!==null)return;
+    var next=pkgClone(proj(),S.pkg);if(!next)return;
+    var t=(next.tasks||[])[+b.dataset.task];if(!t)return;
+    t.done=!t.done;
+    t.doneBy=t.done?S.user.id:null;
+    t.doneAt=t.done?Date.now():null;
+    savePackage(next);render();
+  })});
+  all("[data-rmtask]",function(b){b.addEventListener("click",function(e){
+    e.stopPropagation();
+    var next=pkgClone(proj(),S.pkg);if(!next)return;
+    (next.tasks||[]).splice(+b.dataset.rmtask,1);
+    savePackage(next);toast("Task removed");render();
   })});
   all("[data-pkgiss]",function(b){b.addEventListener("click",function(){
     var key=b.dataset.pkgiss,p=proj();
@@ -4022,6 +4282,16 @@ function bind(){
     var adv=S.modal.advance;
     S.modal=null;
     doCommit("Pass",null,adv);
+  });
+  on("pdclose","click",function(){
+    var adv=S.modal.advance;S.modal=null;
+    doCommit("Pass",null,adv,true);
+    toast("Passed and the defect is closed");
+  });
+  on("pdkeep","click",function(){
+    var adv=S.modal.advance;S.modal=null;
+    doCommit("Pass",null,adv,false);
+    toast("Passed — the defect stays open");
   });
   on("lbclose","click",function(){
     var back=S.modal&&S.modal.back;
