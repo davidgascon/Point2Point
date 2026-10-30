@@ -26,7 +26,12 @@ import unicodedata
 from pathlib import Path
 
 import httpx
+from copy import copy
+
 import openpyxl
+from openpyxl.comments import Comment
+from openpyxl.formatting.formatting import ConditionalFormattingList
+from openpyxl.worksheet.cell_range import MultiCellRange
 from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -138,46 +143,85 @@ def map_columns(ws, hdr: int) -> dict:
     return cols
 
 
-ADDED_SHEET = "Added in the field"
-ADDED_HEADERS = [
-    "Unit Tag", "Point Name", "Type", "Controller", "Description",
-    "Address", "Installed and Labeled", "Point To Point",
-    "Trend/History", "Alarm", "Graphic", "Startup Date", "Notes",
-]
+# ───────────────── inserting field-added points into the main sheet ──────────
+
+def _shift(lo, hi, at, n=1, extend_adjacent=False):
+    """How a row range moves when n rows are inserted at `at`.
+
+    extend_adjacent grows a block ending immediately above the insertion —
+    right for a formatting band, wrong for a formula, where G59:L59 means
+    "this row" and stretching it to G59:L60 silently averages in a neighbour."""
+    if lo >= at:
+        return lo + n, hi + n
+    if hi >= at:
+        return lo, hi + n
+    if extend_adjacent and hi == at - 1:
+        return lo, hi + n
+    return lo, hi
 
 
-def _write_added_sheet(wb, points: list) -> None:
-    """Stage field-added points on their own sheet.
+def _shift_sqref(sqref, at, n=1):
+    out = []
+    for part in str(sqref).split():
+        m = re.match(r"^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$", part)
+        if not m:
+            out.append(part)
+            continue
+        c1, r1, c2, r2 = m.group(1), int(m.group(2)), m.group(3), m.group(4)
+        if c2 is None:
+            r1b, _ = _shift(r1, r1, at, n, extend_adjacent=True)
+            out.append(f"{c1}{r1b}")
+        else:
+            r1b, r2b = _shift(r1, int(r2), at, n, extend_adjacent=True)
+            out.append(f"{c1}{r1b}:{c2}{r2b}")
+    return " ".join(out)
 
-    These have no row in the main sheet. Inserting one from here would break
-    things quietly, so instead they land here ready to be copied into the main
-    sheet in Excel, which fixes up formatting and formula ranges as it inserts.
-    """
-    if ADDED_SHEET in wb.sheetnames:
-        del wb[ADDED_SHEET]
-    ws = wb.create_sheet(ADDED_SHEET)
 
-    ws["A1"] = "Points added in the field — not yet in the Main P2PCO Sheet"
-    ws["A2"] = (
-        "Insert these rows into the main sheet in Excel (right-click a row in "
-        "the right unit block, Insert), then paste the values across. Inserting "
-        "in Excel keeps the conditional formatting bands and the % Complete "
-        "formulas correct; writing them from outside Excel does not."
-    )
-    for i, head in enumerate(ADDED_HEADERS, start=1):
-        ws.cell(4, i).value = head
+def _shift_formula(f, at, n=1):
+    def fix(m):
+        col1, r1, col2, r2 = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+        a, b = _shift(r1, r2, at, n)
+        return f"{col1}{a}:{col2}{b}"
+    return re.sub(r"(\$?[A-Z]{1,3})(\d+):(\$?[A-Z]{1,3})(\d+)", fix, f)
 
-    for r, p in enumerate(points, start=5):
-        vals = [
-            p.unit, p.tag, p.type, p.controller, p.descr, p.addr,
-            p.installed, p.p2p, p.trends, p.alarm, p.graphic, p.startup, p.notes,
-        ]
-        for c, v in enumerate(vals, start=1):
-            ws.cell(r, c).value = v or None
 
-    widths = [14, 34, 7, 26, 32, 11, 20, 16, 15, 12, 12, 14, 40]
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[chr(64 + i)].width = w
+def insert_row_like(ws, at, model_row, ncols):
+    """Insert a row that inherits its neighbour's look, dragging the
+    conditional formatting, validation and formulas with it. openpyxl shifts
+    cell values on insert and nothing else, so without this the colour bands
+    end one row short and the added point is the row that never formats."""
+    ws.insert_rows(at)
+    src_row = model_row if model_row < at else model_row + 1
+    for c in range(1, ncols + 1):
+        s, d = ws.cell(src_row, c), ws.cell(at, c)
+        if s.has_style:
+            d._style = copy(s._style)
+
+    rules = [(str(rng.sqref), list(rs))
+             for rng, rs in ws.conditional_formatting._cf_rules.items()]
+    ws.conditional_formatting = ConditionalFormattingList()
+    for sqref, rs in rules:
+        moved = _shift_sqref(sqref, at)
+        for rule in rs:
+            ws.conditional_formatting.add(moved, rule)
+
+    for dv in ws.data_validations.dataValidation:
+        dv.sqref = MultiCellRange(_shift_sqref(dv.sqref, at))
+
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, ncols + 1):
+            cell = ws.cell(r, c)
+            v = cell.value
+            if not isinstance(v, str) or not v.startswith("="):
+                continue
+            if r >= at:
+                cell.value = re.sub(
+                    r"(\$?[A-Z]{1,3})(\d+)",
+                    lambda m: f"{m.group(1)}{r}"
+                    if int(m.group(2)) in (r - 1, r) else m.group(0), v)
+            else:
+                cell.value = _shift_formula(v, at)
+    return at
 
 
 # ------------------------------------------------------------------- models
@@ -185,12 +229,11 @@ class Point(BaseModel):
     unit: str | None = ""
     tag: str
     sheet_row: int | None = None
-    # Points added at the panel that have no row in the workbook yet.
-    added: bool = False
+    added: bool | None = False
     type: str | None = ""
+    controller: str | None = ""
     descr: str | None = ""
     addr: str | None = ""
-    controller: str | None = ""
     installed: str | None = ""
     p2p: str | None = ""
     trends: str | None = ""
@@ -265,9 +308,11 @@ async def export_p2p(
 
     written = cleared = matched = 0
     unmatched: list[str] = []
-    added: list[Point] = []
 
+    added_rows = [p for p in body.points if p.added]
     for p in body.points:
+        if p.added:
+            continue
         row = None
         # Prefer the recorded sheet row: it survives a tag being corrected
         # in the field, which matching on text alone would not.
@@ -280,16 +325,7 @@ async def export_p2p(
             cand = bytag.get(norm(p.tag), [])
             row = cand[0] if len(cand) == 1 else None
         if row is None:
-            # A field-added point. We deliberately do NOT insert a row into the
-            # main sheet: openpyxl does not shift conditional-formatting ranges
-            # or the M2 rollup, so a mid-sheet insert silently misaligns the
-            # 61 CF bands and the per-row % Complete formulas. Excel updates
-            # those correctly on its own, so these go to a staging sheet for a
-            # human to insert properly.
-            if p.added:
-                added.append(p)
-            else:
-                unmatched.append(f"{p.unit} / {p.tag}")
+            unmatched.append(f"{p.unit} / {p.tag}")
             continue
 
         matched += 1
@@ -308,8 +344,48 @@ async def export_p2p(
                 ws.cell(row, col).value = val
                 written += 1
 
-    if added:
-        _write_added_sheet(wb, added)
+    # Field-added points have no row yet: put each in its unit's block so it
+    # sits with its siblings and inherits that block's formatting.
+    inserted = 0
+    ncols = ws.max_column
+    for p in added_rows:
+        unit = norm(p.unit)
+        last = None
+        for rr in range(hdr + 1, ws.max_row + 1):
+            if cols.get("unit") and norm(ws.cell(rr, cols["unit"]).value) == unit:
+                last = rr
+        model = last if last else ws.max_row
+        at = (last + 1) if last else (ws.max_row + 1)
+        insert_row_like(ws, at, model, ncols)
+
+        msrc = model if model < at else model + 1
+        for c in range(1, ncols + 1):
+            fv = ws.cell(msrc, c).value
+            if isinstance(fv, str) and fv.startswith("="):
+                ws.cell(at, c).value = re.sub(
+                    r"(\$?[A-Z]{1,3})(\d+)",
+                    lambda m: f"{m.group(1)}{at}"
+                    if int(m.group(2)) == msrc else m.group(0), fv)
+
+        if cols.get("unit"):
+            ws.cell(at, cols["unit"]).value = p.unit or ""
+        ws.cell(at, cols["tag"]).value = p.tag
+        for field in FIELD_HEADERS:
+            col = cols.get(field)
+            val = getattr(p, field, "") or ""
+            if col and val and val != CLEAR:
+                ws.cell(at, col).value = val
+        headers = {norm(ws.cell(hdr, c).value): c for c in range(1, ncols + 1)}
+        for label, val in (("type", p.type), ("controller", p.controller),
+                           ("description", p.descr), ("address", p.addr)):
+            for h, c in headers.items():
+                if h.startswith(label):
+                    ws.cell(at, c).value = val or ""
+                    break
+        if (p.notes or "").strip() and cols.get("p2p"):
+            ws.cell(at, cols["p2p"]).comment = Comment(
+                p.notes.strip(), "Field Checkout", height=90, width=260)
+        inserted += 1
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -326,6 +402,6 @@ async def export_p2p(
             "X-Cells-Written": str(written),
             "X-Cells-Cleared": str(cleared),
             "X-Unmatched": str(len(unmatched)),
-            "X-Added-Points": str(len(added)),
+            "X-Added-Points": str(inserted),
         },
     )
