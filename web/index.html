@@ -435,7 +435,33 @@ var DATA_VERSION="kokusai-p2p-current-2026-09-19d";
      major change  -> add .1 and zero the rest (1.35 -> 1.4, 1.9 -> 2.0)
    A tech reading this off a phone in a mech room should tell you exactly
    which build they are on. */
-var APP_VERSION="1.01";
+var APP_VERSION="1.11";
+/* Newest first. Keep entries short — this is read on a phone, by someone who
+   wants to know whether the thing they are hitting was already fixed. */
+var CHANGELOG=[
+  {v:"1.11", d:"2026-10-30", items:[
+    "Exported sheets no longer come out with rows hidden"
+  ]},
+  {v:"1.1", d:"2026-10-30", items:[
+    "Fixed: text typed into a reading field could run as code for other users",
+    "Fixed: notes starting with = + - @ became live formulas in the exported sheet",
+    "Hardened the export service against a crafted project id",
+    "Clearer errors when setting the export workbook"
+  ]},
+  {v:"1.01", d:"2026-10-30", items:[
+    "Fixed: setting the export workbook failed with \u201cMissing bearer token\u201d",
+    "Version number added, and this list"
+  ]},
+  {v:"1.0", d:"2026-10-30", items:[
+    "Choose the P2P workbook in Project settings, no command line",
+    "Imported projects keep their workbook automatically, so Export works from day one",
+    "Field-added points are inserted into the main sheet with its formatting",
+    "Work packages hold points, defects and free-form tasks",
+    "Undo, with a log of recent changes",
+    "Photos on a point, not just on a defect",
+    "Passing a point with an open defect now asks what to do with it"
+  ]}
+];
 var TECHS={dg:{n:"Dylan G.",i:"DG",email:"dylan@macmiller.com",role:"lead",active:true,last:0},
   jh:{n:"Jacob H.",i:"JH",email:"jacob@macmiller.com",role:"tech",active:true,last:0},
   ew:{n:"Eric W.",i:"EW",email:"eric@macmiller.com",role:"tech",active:true,last:0}};
@@ -933,13 +959,27 @@ function exportRows(p){
         else if(v==="done")row[m[1]]=stamp(pt.checksBy||pt.by,pt.checksAt||pt.at)||"✓";
       });
     if(pt.issue&&!pt.issue.resolved&&pt.issue.desc)row.notes=pt.issue.desc;
+    // Neutralised here as well as in the CSV: these go to the server exporter
+    // and straight into workbook cells.
+    ["installed","p2p","trends","alarm","graphic","startup","notes",
+     "descr","addr","controller","unit","tag"].forEach(function(k){
+      if(row[k])row[k]=deFormula(row[k]);
+    });
     return row;
   });
 }
 var EXPORT_COLS=[["unit","Unit Tag"],["tag","Point Name"],["installed","Installed and Labeled"],
   ["p2p","Point To Point"],["trends","Trend/History"],["alarm","Alarm"],
   ["graphic","Graphic"],["startup","Startup Date"],["notes","Notes"]];
-function csvCell(v){v=String(v==null?"":v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}
+/* Excel and Sheets treat a leading = + - @ as a formula, and these values are
+   typed by techs and land in a file emailed to a customer. A leading
+   apostrophe forces the cell to text; it is not shown when the sheet is
+   opened. Tab and CR are stripped because they break out of a CSV cell. */
+function deFormula(v){
+  v=String(v==null?"":v).replace(/[\t\r]/g,"");
+  return /^[=+\-@]/.test(v) ? "'"+v : v;
+}
+function csvCell(v){v=deFormula(v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}
 function download(name,text,mime){
   try{
     var b=new Blob([text],{type:mime||"text/plain"}),u=URL.createObjectURL(b);
@@ -1520,7 +1560,7 @@ function render(){
   var v={signin:vSignin,projects:vProjects,units:vUnits,points:vPoints,verify:vVerify,
          device:vDevice,issues:vIssues,projset:vProjSet,
          more:vMore,account:vAccount,howto:vHowto,info:vInfo,admin:vAdmin,work:vWork,
-         log:vLog}[S.screen];
+         log:vLog,changes:vChanges}[S.screen];
   var h=v();
   h+=vModal();
   if(S.toast)h+='<div class="toast">'+esc(S.toast)+'</div>';
@@ -1880,13 +1920,13 @@ function readingSummary(pt,d){
     var f=parseFloat(d.found),b=parseFloat(d.bas),t=parseFloat(d.tol);
     if(isNaN(f)||isNaN(b))return'<span style="color:var(--faint)">Not recorded</span>';
     var dev=Math.round((b-f)*100)/100;
-    if(isNaN(t))return'<span class="mono">'+d.found+' → '+d.bas+'</span>';
+    if(isNaN(t))return'<span class="mono">'+esc(d.found)+' → '+esc(d.bas)+'</span>';
     var ok=Math.abs(dev)<=Math.abs(t);
-    return'<span class="mono">'+d.found+' → '+d.bas+'</span> '+
+    return'<span class="mono">'+esc(d.found)+' → '+esc(d.bas)+'</span> '+
       '<span style="color:'+(ok?"var(--pass)":"var(--fail)")+'">'+(ok?"in tolerance":"out of tolerance")+'</span>';
   }
   if(!d.cmd||!d.obs)return'<span style="color:var(--faint)">Not recorded</span>';
-  return'<span class="mono">'+d.cmd+' → '+d.obs+'</span> '+
+  return'<span class="mono">'+esc(d.cmd)+' → '+esc(d.obs)+'</span> '+
     '<span style="color:'+(d.cmd===d.obs?"var(--pass)":"var(--fail)")+'">'+
     (d.cmd===d.obs?"matches":"does not match")+'</span>';
 }
@@ -2969,6 +3009,26 @@ function vLog(){
   });
   return h;
 }
+function vChanges(){
+  var h='<div class="bar"><button class="iconbtn" id="backchg" aria-label="Back">\u2039</button>'+
+    '<h1>What changed<span class="sub">currently on v'+esc(APP_VERSION)+'</span></h1>'+
+    homeBtn()+'</div>'+strip()+'<div class="body">';
+  CHANGELOG.forEach(function(r,i){
+    h+='<div class="card"'+(i===0?' style="border-color:var(--accent)"':'')+'>'+
+      '<div style="display:flex;align-items:baseline;gap:9px">'+
+      '<h3 style="color:'+(i===0?"var(--accent)":"var(--dim)")+';font-size:15px">v'+
+      esc(r.v)+'</h3>'+
+      (i===0?'<span class="pill" style="color:var(--accent);border-color:var(--accent)">'+
+        'you are here</span>':'')+
+      '<span style="margin-left:auto;font-size:11.5px;color:var(--faint)">'+esc(r.d)+'</span>'+
+      '</div>'+
+      '<ul style="margin:9px 0 0 17px;font-size:13.5px;line-height:1.7;color:var(--text)">'+
+      r.items.map(function(x){return'<li>'+esc(x)+'</li>'}).join("")+
+      '</ul></div>';
+  });
+  h+='<div class="vfoot">A change adds .1 · a small fix adds .01</div>';
+  return h+'</div>';
+}
 function vMore(){
   var h='<div class="bar"><button class="iconbtn" id="backmore" aria-label="Back">‹</button>'+
     '<h1>Menu<span class="sub">'+esc(S.user.n)+' · '+esc(roleOf(S.user.id))+'</span></h1>'+'</div>'+strip();
@@ -2987,7 +3047,9 @@ function vMore(){
       :"People, roles, resets, activity");
   }
   h+=menuRow("device","▢","This device","Storage, queue, offline test");
-  h+='<div class="vfoot">Field Checkout <span class="mono">v'+esc(APP_VERSION)+'</span></div>';
+  h+='<button class="vfoot" id="tochanges" style="width:100%;background:none;border:none">'+
+    'Field Checkout <span class="mono" style="color:var(--accent)">v'+esc(APP_VERSION)+
+    '</span> <span style="color:var(--accent)">\u2192 what changed</span></button>';
   return h;
 }
 function vAccount(){
@@ -3109,6 +3171,7 @@ function vInfo(){
     'iPhones run nothing in the background. Nothing syncs while the app is closed — that is Apple, not a bug.</div></div>';
   h+='<div class="card"><h3>Version</h3>'+
     '<div class="kv"><span>Version</span><span class="mono">'+esc(APP_VERSION)+'</span></div>'+
+    '<button class="ghost" id="tochanges" style="margin-top:4px">See what changed</button>'+
     '<div class="kv"><span>Build</span><span class="mono">'+esc(DATA_VERSION)+'</span></div>'+
     '<div class="kv"><span>Signed in as</span><span>'+esc(S.user.n)+'</span></div>'+
     '<div class="kv"><span>Storage on device</span><span>'+(USE_MEM?"memory only":"persistent")+'</span></div></div>';
@@ -3652,6 +3715,9 @@ function bind(){
     S.authOk="Demo ended. Sign in to reach your real jobs.";
     render();
   });
+  on("tochanges","click",function(){S._chgFrom=S.screen;S.screen="changes";render()});
+  on("backchg","click",function(){
+    goBack(function(){S.screen=S._chgFrom||"more";render()})});
   on("backlog","click",function(){goBack(function(){S.screen="more";render()})});
   all("[data-lf]",function(b){b.addEventListener("click",function(){
     S.logFilter=b.dataset.lf;render()})});

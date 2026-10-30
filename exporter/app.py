@@ -76,6 +76,9 @@ async def caller(authorization: str = Header(default="")) -> dict:
 async def require_member(project_id: str, who: dict) -> None:
     """Membership is checked against PocketBase using the caller's own token,
     so its API rules — not this service — remain the source of truth."""
+    # Validated before it is interpolated into the filter below. Without this
+    # a crafted id could close the quote and rewrite the membership test.
+    project_id = safe_id(project_id)
     if who["user"].get("role") == "admin":
         return
     async with httpx.AsyncClient(timeout=10) as c:
@@ -96,6 +99,14 @@ def norm(v) -> str:
     if v is None:
         return ""
     return " ".join(unicodedata.normalize("NFKD", str(v)).split()).strip().lower()
+
+
+def de_formula(v):
+    """Excel treats a leading = + - @ as a formula. These values are typed by
+    techs and land in a workbook that gets emailed to a customer, so they are
+    forced to text here regardless of what the client sent."""
+    s = str(v if v is not None else "").replace("\t", "").replace("\r", "")
+    return "'" + s if s[:1] in ("=", "+", "-", "@") else s
 
 
 def safe_id(pid: str) -> str:
@@ -295,6 +306,17 @@ async def export_p2p(
     hdr = header_row(ws)
     cols = map_columns(ws, hdr)
 
+    # Templates often arrive with rows hidden from an old filter. A sign-off
+    # written into a hidden row is invisible to whoever opens the sheet, which
+    # looks exactly like the export having failed.
+    unhidden = 0
+    for rd in ws.row_dimensions.values():
+        if rd.hidden:
+            rd.hidden = False
+            unhidden += 1
+        if rd.height == 0:
+            rd.height = None
+
     idx, bytag = {}, {}
     for r in range(hdr + 1, ws.max_row + 1):
         tag = ws.cell(r, cols["tag"]).value
@@ -341,7 +363,7 @@ async def export_p2p(
                     cleared += 1
                 ws.cell(row, col).value = None
             else:
-                ws.cell(row, col).value = val
+                ws.cell(row, col).value = de_formula(val)
                 written += 1
 
     # Field-added points have no row yet: put each in its unit's block so it
@@ -368,19 +390,19 @@ async def export_p2p(
                     if int(m.group(2)) == msrc else m.group(0), fv)
 
         if cols.get("unit"):
-            ws.cell(at, cols["unit"]).value = p.unit or ""
-        ws.cell(at, cols["tag"]).value = p.tag
+            ws.cell(at, cols["unit"]).value = de_formula(p.unit or "")
+        ws.cell(at, cols["tag"]).value = de_formula(p.tag)
         for field in FIELD_HEADERS:
             col = cols.get(field)
             val = getattr(p, field, "") or ""
             if col and val and val != CLEAR:
-                ws.cell(at, col).value = val
+                ws.cell(at, col).value = de_formula(val)
         headers = {norm(ws.cell(hdr, c).value): c for c in range(1, ncols + 1)}
         for label, val in (("type", p.type), ("controller", p.controller),
                            ("description", p.descr), ("address", p.addr)):
             for h, c in headers.items():
                 if h.startswith(label):
-                    ws.cell(at, c).value = val or ""
+                    ws.cell(at, c).value = de_formula(val or "")
                     break
         if (p.notes or "").strip() and cols.get("p2p"):
             ws.cell(at, cols["p2p"]).comment = Comment(
@@ -403,5 +425,6 @@ async def export_p2p(
             "X-Cells-Cleared": str(cleared),
             "X-Unmatched": str(len(unmatched)),
             "X-Added-Points": str(inserted),
+            "X-Rows-Unhidden": str(unhidden),
         },
     )
