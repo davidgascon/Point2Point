@@ -435,7 +435,7 @@ var DATA_VERSION="kokusai-p2p-current-2026-09-19d";
      major change  -> add .1 and zero the rest (1.35 -> 1.4, 1.9 -> 2.0)
    A tech reading this off a phone in a mech room should tell you exactly
    which build they are on. */
-var APP_VERSION="1.0";
+var APP_VERSION="1.01";
 var TECHS={dg:{n:"Dylan G.",i:"DG",email:"dylan@macmiller.com",role:"lead",active:true,last:0},
   jh:{n:"Jacob H.",i:"JH",email:"jacob@macmiller.com",role:"tech",active:true,last:0},
   ew:{n:"Eric W.",i:"EW",email:"eric@macmiller.com",role:"tech",active:true,last:0}};
@@ -2780,7 +2780,7 @@ function uploadTemplate(projId,file){
   fd.append("file",file,file.name||"template.xlsm");
   return fetch("/export/template/"+projId,{
     method:"POST",
-    headers:{"Authorization":pb.authStore.token},
+    headers:{"Authorization":"Bearer "+pb.authStore.token},
     body:fd
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t.slice(0,200)||r.status)});
@@ -2789,7 +2789,7 @@ function uploadTemplate(projId,file){
 }
 function templateStatus(projId){
   return fetch("/export/template/"+projId,{
-    headers:{"Authorization":pb.authStore.token}
+    headers:{"Authorization":"Bearer "+pb.authStore.token}
   }).then(function(r){return r.ok}).catch(function(){return false});
 }
 function pbCreateProject(pv,name,job,loc){
@@ -3872,8 +3872,10 @@ function bind(){
     }).catch(function(err){
       S.tplBusy=false;
       var m=String(err.message||err);
-      if(/403|lead|admin/i.test(m))m="Only a lead or admin can set the workbook.";
+      if(/bearer|401|signed in/i.test(m))m="Your session expired — sign out and back in.";
+      else if(/403|lead|admin/i.test(m))m="Only a lead or admin can set the workbook.";
       else if(/413|large/i.test(m))m="That file is too big (25 MB limit).";
+      else if(/422|workbook/i.test(m))m="That file is not a readable .xlsm workbook.";
       S.tplErr=m;render();
     });
   });
