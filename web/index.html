@@ -361,6 +361,8 @@ section.blk{padding:16px;border-bottom:1px solid var(--edge)}
 .qrow{font-size:12px;color:var(--dim);padding:7px 0;border-bottom:1px solid var(--edge);
   display:flex;justify-content:space-between;gap:10px}
 .note{font-size:12.5px;color:var(--faint);padding:16px 14px;text-align:center}
+.vfoot{text-align:center;color:var(--faint);font-size:11.5px;padding:18px 14px 26px;
+  letter-spacing:.02em}
 .switch{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0}
 .switch .lab{font-size:14px;font-weight:500}
 .switch .hint{font-size:12px;color:var(--dim);margin-top:2px}
@@ -428,6 +430,12 @@ try{
 
 var FLUSH_EVERY=6000, COWORKER_EVERY=11000;
 var DATA_VERSION="kokusai-p2p-current-2026-09-19d";
+/* App version. Bump on every deploy of web/index.html.
+     minor change  -> add .01   (1.35 -> 1.36)
+     major change  -> add .1 and zero the rest (1.35 -> 1.4, 1.9 -> 2.0)
+   A tech reading this off a phone in a mech room should tell you exactly
+   which build they are on. */
+var APP_VERSION="1.0";
 var TECHS={dg:{n:"Dylan G.",i:"DG",email:"dylan@macmiller.com",role:"lead",active:true,last:0},
   jh:{n:"Jacob H.",i:"JH",email:"jacob@macmiller.com",role:"tech",active:true,last:0},
   ew:{n:"Eric W.",i:"EW",email:"eric@macmiller.com",role:"tech",active:true,last:0}};
@@ -823,6 +831,7 @@ var S={screen:"signin",user:null,proj:null,unit:null,q:"",filter:"open",idx:0,
   printOpts:{status:"open",prio:"any",party:"any",unit:"any",kind:"any",notes:true},
   sort:"sheet",pkg:null,pkgFilter:"mine",loadErr:null,defSel:false,defPick:{},
   log:[],logFilter:"mine",logLoading:false,taskDraft:"",taskFocus:false,
+  tpl:null,tplBusy:false,tplErr:null,
   authMode:"signin",authErr:null,authOk:null,authEmail:"",suName:"",suInit:"",suEmail:"",
   prefs:{openLife:false,openReading:false,openChecks:true,openNotes:false,
          confirmPass:true,tolAI:"2",tolAO:"3"}};
@@ -1583,6 +1592,7 @@ function vSignin(){
       :'<div class="who-pick">'+Object.keys(TECHS).map(function(k){
         return'<button data-t="'+k+'" aria-pressed="'+(S.pick===k)+'">'+esc(TECHS[k].i)+'</button>'
       }).join("")+'</div>'+
+      '<div class="vfoot" style="padding:12px 0 0">v'+esc(APP_VERSION)+'</div>'+
       '<p style="font-size:12px;color:var(--faint)">Prototype — pick an account above, or '+
       '<a href="#" id="tosignup" style="color:var(--accent)">create one</a>.</p>'));
 }
@@ -2762,6 +2772,26 @@ function parseP2P(wb){
 /* Create an imported project on the server. 456 points is 456 records, so
    they go up in small concurrent batches with visible progress rather than
    one long silent wait. */
+/* The exporter writes your data into a copy of the original workbook, so it
+   needs that workbook on disk. The browser already has the file in hand at
+   import time, so there is no reason to make anyone upload it separately. */
+function uploadTemplate(projId,file){
+  var fd=new FormData();
+  fd.append("file",file,file.name||"template.xlsm");
+  return fetch("/export/template/"+projId,{
+    method:"POST",
+    headers:{"Authorization":pb.authStore.token},
+    body:fd
+  }).then(function(r){
+    if(!r.ok)return r.text().then(function(t){throw new Error(t.slice(0,200)||r.status)});
+    return r.json().catch(function(){return{}});
+  });
+}
+function templateStatus(projId){
+  return fetch("/export/template/"+projId,{
+    headers:{"Authorization":pb.authStore.token}
+  }).then(function(r){return r.ok}).catch(function(){return false});
+}
 function pbCreateProject(pv,name,job,loc){
   var projId=null,made=0,total=pv.points.length;
   function setProgress(t){
@@ -2957,6 +2987,7 @@ function vMore(){
       :"People, roles, resets, activity");
   }
   h+=menuRow("device","▢","This device","Storage, queue, offline test");
+  h+='<div class="vfoot">Field Checkout <span class="mono">v'+esc(APP_VERSION)+'</span></div>';
   return h;
 }
 function vAccount(){
@@ -3077,7 +3108,8 @@ function vInfo(){
     '<div style="font-size:11.5px;color:var(--faint);margin-top:10px">'+
     'iPhones run nothing in the background. Nothing syncs while the app is closed — that is Apple, not a bug.</div></div>';
   h+='<div class="card"><h3>Version</h3>'+
-    '<div class="kv"><span>App</span><span class="mono">'+esc(DATA_VERSION)+'</span></div>'+
+    '<div class="kv"><span>Version</span><span class="mono">'+esc(APP_VERSION)+'</span></div>'+
+    '<div class="kv"><span>Build</span><span class="mono">'+esc(DATA_VERSION)+'</span></div>'+
     '<div class="kv"><span>Signed in as</span><span>'+esc(S.user.n)+'</span></div>'+
     '<div class="kv"><span>Storage on device</span><span>'+(USE_MEM?"memory only":"persistent")+'</span></div></div>';
   h+='<div class="card"><h3>Something wrong?</h3>'+
@@ -3272,12 +3304,35 @@ function vProjSet(){
     'Passed points export as tech initials plus a short date — <span class="mono">RO 9/19</span>. '+
     'Failed points export as <span class="mono">DNP</span>. N/A stays N/A.</div>'+
     (LIVE?'<button class="big" id="expxlsm">Export the P2P workbook</button>':'')+
+    (LIVE
+      ?'<div style="margin-top:11px;border:1px solid '+
+       (S.tpl===false?"var(--issue)":"var(--edge)")+';border-radius:11px;padding:12px">'+
+       '<div style="font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:8px">'+
+       '<span class="led" style="background:'+
+       (S.tpl===true?"var(--pass)":(S.tpl===false?"var(--issue)":"var(--faint)"))+'"></span>'+
+       (S.tpl===true?"Workbook on file"
+         :(S.tpl===false?"No workbook on file yet":"Checking…"))+'</div>'+
+       '<div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.6">'+
+       (S.tpl===false
+         ? "Export needs the original P2P workbook to write into. Projects "+
+           "imported from a sheet keep it automatically; this one was created "+
+           "before that, so pick the file once."
+         : "Exports are written into a copy of this workbook, so they come back "+
+           "with its formatting and macros intact.")+'</div>'+
+       '<label class="ghost" for="tplfile" style="display:flex;align-items:center;'+
+       'justify-content:center;cursor:pointer;margin-top:9px">'+
+       (S.tplBusy?"Uploading…":(S.tpl===true?"Replace the workbook":"Choose the P2P workbook"))+
+       '</label>'+
+       '<input id="tplfile" type="file" accept=".xlsm,.xlsx" style="display:none"/>'+
+       (S.tplErr?'<div class="warn" style="margin:9px 0 0">'+esc(S.tplErr)+'</div>':'')+
+       '</div>'
+      :'')+
     '<button class="ghost" id="expjson">Download update file (.json)</button>'+
     '<button class="ghost" id="expcsv">Download as CSV</button>'+
     '<div style="font-size:11.5px;color:var(--faint);margin-top:11px;line-height:1.6">'+
-    'The .json feeds <span class="mono">export_p2p.py</span> on your server, which writes these '+
-    'values into your original workbook and returns an .xlsm identical to it — same fonts, fills, '+
-    'conditional formatting and macros. A browser cannot preserve that formatting on its own.</div></div>';
+    'The .json is for writing the data into a workbook yourself. The export button '+
+    'above does it on the server and hands you the finished .xlsm — same fonts, fills, '+
+    'conditional formatting and macros. A browser cannot preserve that on its own.</div></div>';
   return h+'</div>';
 }
 function vDevice(){
@@ -3763,7 +3818,12 @@ function bind(){
     var k="u:"+b.dataset.bk;S.open[k]=!S.open[k];render()})});
   all("[data-bkp]",function(b){b.addEventListener("click",function(){
     var k="p:"+b.dataset.bkp;S.open[k]=!S.open[k];render()})});
-  on("toprojset","click",function(){S.screen="projset";render()});
+  on("toprojset","click",function(){
+    S.screen="projset";S.tpl=null;S.tplErr=null;
+    if(LIVE&&S.proj&&online())
+      templateStatus(S.proj).then(function(ok){S.tpl=ok;render()});
+    render();
+  });
   on("back5","click",function(){goBack(function(){S.screen="units";render()})});
   on("pssave","click",function(){
     var p=proj();
@@ -3791,7 +3851,31 @@ function bind(){
         toast("Exported"+(added&&added!=="0"?" — "+added+" added points on their own sheet":"")+
           (un&&un!=="0"?" — "+un+" unmatched":""));
       });
-    }).catch(function(e){toast("Export failed: "+pbErr(e))});
+    }).catch(function(e){
+      var m=pbErr(e);
+      if(/no template|404/i.test(m)){
+        S.tpl=false;
+        m="No workbook on file — choose the P2P workbook just below.";
+      }
+      toast("Export failed: "+m);render();
+    });
+  });
+  on("tplfile","change",function(e){
+    var f=e.target.files&&e.target.files[0];if(!f)return;
+    if(!/\.xls[mx]$/i.test(f.name)){
+      S.tplErr="That needs to be the .xlsm or .xlsx workbook.";render();return;
+    }
+    S.tplBusy=true;S.tplErr=null;render();
+    uploadTemplate(S.proj,f).then(function(){
+      S.tplBusy=false;S.tpl=true;S.tplErr=null;
+      toast("Workbook saved — Export will use it");render();
+    }).catch(function(err){
+      S.tplBusy=false;
+      var m=String(err.message||err);
+      if(/403|lead|admin/i.test(m))m="Only a lead or admin can set the workbook.";
+      else if(/413|large/i.test(m))m="That file is too big (25 MB limit).";
+      S.tplErr=m;render();
+    });
   });
   on("expjson","click",function(){
     var p=proj();
@@ -3934,6 +4018,7 @@ function bind(){
   on("newproj","click",function(){S.modal={kind:"newproj",preview:null,jobName:"",jobNumber:"",loc:""};render()});
   on("pfile","change",function(e){
     var file=e.target.files&&e.target.files[0];if(!file)return;
+    S.modal.file=file;
     if(typeof XLSX==="undefined"){S.modal.err="Spreadsheet reader didn't load. Reconnect and try again.";render();return}
     S.modal.busy=true;S.modal.err=null;render();
     var fr=new FileReader();
@@ -3963,9 +4048,26 @@ function bind(){
       if(!online()){toast("Importing needs a connection");return}
       m.busy=true;m.progress="Starting…";render();
       pbCreateProject(pv,nm,no,lc||("Imported from "+pv.sheet)).then(function(projId){
+        // Keep the workbook that was just imported, so Export works from the
+        // first day without anyone having to think about it.
+        var f=m.file;
+        if(!f)return projId;
+        if(S.modal){S.modal.progress="Saving the workbook for exports…";render()}
+        return uploadTemplate(projId,f)
+          .then(function(){return projId})
+          .catch(function(e){
+            // The points are already in. A missing template is recoverable
+            // from Project settings, so it must not fail the import.
+            console.log("[template] upload failed: "+e);
+            S._tplWarn=true;
+            return projId;
+          });
+      }).then(function(projId){
         S.modal=null;
         return pull().then(function(){
-          toast(pv.points.length+" points imported");
+          toast(pv.points.length+" points imported"+
+            (S._tplWarn?" — set the export template in Project settings":""));
+          S._tplWarn=false;
           S.proj=projId;S.unit=null;S.q="";S.filter="open";S.screen="units";
           if(LIVE)pbSubscribe();
           render();
