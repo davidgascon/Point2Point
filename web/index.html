@@ -466,16 +466,18 @@ var DATA_VERSION="kokusai-p2p-current-2026-09-19d";
      major change  -> add .1 and zero the rest (1.35 -> 1.4, 1.9 -> 2.0)
    A tech reading this off a phone in a mech room should tell you exactly
    which build they are on. */
-var APP_VERSION="1.21";
+var APP_VERSION="1.22";
 /* Newest first. Keep entries short — this is read on a phone, by someone who
    wants to know whether the thing they are hitting was already fixed. */
 var CHANGELOG=[
+  {v:"1.22", d:"2026-10-30", items:[
+    "Rename a point, and edit its description, from the point screen",
+    "Tap a task to open it, add notes, and tick it off from either place"
+  ]},
   {v:"1.21", d:"2026-10-30", items:[
     "Syncing sends a whole batch in one request instead of one call per change",
     "Split view on iPad and laptop: the list stays on the left while you work on the right",
-    "Close out a package even when it is not finished, carrying the rest to a new one",
-    "Rename a point, and edit its description, from the point screen",
-    "Tap a task to open it, add notes, and tick it off from either place"
+    "Close out a package even when it is not finished, carrying the rest to a new one"
   ]},
   {v:"1.2", d:"2026-10-30", items:[
     "Tasks: assign to a person, set a due date, tie to a controller or to nothing",
