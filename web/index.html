@@ -473,7 +473,9 @@ var CHANGELOG=[
   {v:"1.21", d:"2026-10-30", items:[
     "Syncing sends a whole batch in one request instead of one call per change",
     "Split view on iPad and laptop: the list stays on the left while you work on the right",
-    "Close out a package even when it is not finished, carrying the rest to a new one"
+    "Close out a package even when it is not finished, carrying the rest to a new one",
+    "Rename a point, and edit its description, from the point screen",
+    "Tap a task to open it, add notes, and tick it off from either place"
   ]},
   {v:"1.2", d:"2026-10-30", items:[
     "Tasks: assign to a person, set a due date, tie to a controller or to nothing",
@@ -744,7 +746,8 @@ function pointPatch(ev,pt){
     return{deleted:!!ev.deleted,deleted_by:ev.deleted?ev.by:null,
       deleted_at:ev.deleted?ev.at:null,delete_reason:ev.deleted?(ev.reason||""):""};
   if(ev.kind==="edit"){
-    var o={};o[ev.field==="addr"?"addr":ev.field]=ev.value;return o;
+    var o={},c=({addr:"addr",tag:"tag",desc:"descr",checks:"checks"})[ev.field]||ev.field;
+    o[c]=ev.value;return o;
   }
   if(ev.kind==="checks")return{checks:pt.checks};
   if(ev.kind==="life")return{status:ev.status||"",by:ev.by,at:ev.at};
@@ -841,7 +844,10 @@ function pbApplyServerSide(ev,p,pt){
       deleted_at:ev.deleted?ev.at:null,
       delete_reason:ev.deleted?(ev.reason||""):""};
   }
-  else if(ev.kind==="edit"){patch[ev.field==="addr"?"addr":ev.field]=ev.value}
+  else if(ev.kind==="edit"){
+    var col=({addr:"addr",tag:"tag",desc:"descr",checks:"checks"})[ev.field]||ev.field;
+    patch[col]=ev.value;
+  }
   else if(ev.kind==="checks"){patch.checks=pt.checks}
   else if(ev.kind==="life"){patch={status:ev.status||"",by:ev.by,at:ev.at}}
   else{patch={status:ev.status,by:ev.by,at:ev.at,reading:ev.reading||null,
@@ -2292,7 +2298,10 @@ function vVerify(){
   var h='<div class="bar"><button class="iconbtn" id="back2" aria-label="Back">‹</button>'+
     '<h1>'+esc(pt.unit)+'<span class="sub">Point '+(S.idx+1)+' of '+list.length+'</span></h1>'+
     planeBtn()+helpBtn()+homeBtn()+gearBtn()+'</div>'+strip();
-  h+='<div class="vpin"><div class="vtag mono">'+esc(pt.tag)+'</div>'+
+  h+='<div class="vpin"><div class="vtag mono" style="display:flex;align-items:flex-start;gap:8px">'+
+    '<span style="flex:1;min-width:0">'+esc(pt.tag)+'</span>'+
+    '<button class="iconbtn" id="edtag" aria-label="Edit point name" '+
+    'style="flex:none;border:1px solid var(--edge);font-size:14px">\u270E</button></div>'+
     '<div class="vdesc">'+esc(pt.desc)+'</div></div>'+
     '<div class="vhead"><div class="meta">'+
     '<span class="pill type" style="background:'+(TYPEC[pt.type]||"var(--edge)")+'">'+pt.type+'</span>'+
@@ -2606,6 +2615,71 @@ function vModal(){
           (S.taskSort===s[0]?'<span class="tick">\u2713</span>':'')+'</button>'
       }).join("")+
       '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Close</button></div>'+
+      '</div></div>';
+  }
+  if(m.kind==="edtag"){
+    return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
+      '<h2>Edit the point name</h2>'+
+      '<div class="sh">On <b>'+esc(m.unit)+'</b>, currently '+
+      '<span class="mono">'+esc(m.was)+'</span></div>'+
+      '<div class="lb">Point name</div>'+
+      '<input id="edtagv" class="mono" autocapitalize="characters" autocomplete="off" '+
+      'spellcheck="false" value="'+esc(m.val!==undefined?m.val:m.was)+'"/>'+
+      '<div class="lb">Description</div>'+
+      '<input id="eddesc" value="'+esc(m.desc!==undefined?m.desc:(m.wasDesc||""))+'"/>'+
+      '<div style="font-size:11.5px;color:var(--faint);margin-top:12px;line-height:1.6">'+
+      'The export falls back to the row this point was imported from, so renaming '+
+      'it will not orphan it. The new name is written into that row on export.</div>'+
+      (m.err?'<div class="warn" style="margin:12px 0 0">'+esc(m.err)+'</div>':'')+
+      '<div class="row"><button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Cancel</button>'+
+      '<button id="edtagsave" style="background:var(--accent);color:#14100C">Save</button></div>'+
+      '</div></div>';
+  }
+  if(m.kind==="taskview"){
+    var tv=projTasks(proj()).filter(function(x){return x.id===m.taskId})[0];
+    if(!tv)return "";
+    var tw=TECHS[tv.assignee], tpr=tv.prio||"Medium";
+    var tod=tv.due&&!tv.done&&tv.due<Date.now();
+    return'<div class="ovl" id="ovl"><div class="sheet" id="sheet">'+
+      '<div style="display:flex;align-items:flex-start;gap:10px">'+
+      '<h2 style="flex:1">'+esc(tv.text)+'</h2>'+
+      '<button class="iconbtn" id="tvedit" aria-label="Edit"'+
+      ' style="flex:none;border:1px solid var(--edge)">\u270E</button></div>'+
+      '<div class="meta" style="margin-top:10px">'+
+      '<span class="pill" style="color:'+(tv.done?"var(--pass)":"var(--issue)")+
+      ';border-color:'+(tv.done?"var(--pass)":"var(--issue)")+'">'+
+      (tv.done?"Done":"To do")+'</span>'+
+      '<span class="pill" style="color:'+prioColor(tpr)+';border-color:'+
+      prioColor(tpr)+'">'+esc(tpr)+'</span>'+
+      (tv.unit?'<span class="pill">'+esc(tv.unit)+'</span>':'')+
+      '<span class="pill">'+(tw?esc(tw.n):"Nobody yet")+'</span>'+
+      (tv.due?'<span class="pill" style="color:'+(tod?"var(--fail)":"var(--dim)")+
+        ';border-color:'+(tod?"var(--fail)":"var(--edge)")+'">'+
+        esc(dueLabel(tv.due))+'</span>':'')+
+      '</div>'+
+      (tv.done&&tv.doneBy
+        ?'<div style="font-size:12px;color:var(--faint);margin-top:9px">Ticked off by '+
+         (TECHS[tv.doneBy]?esc(TECHS[tv.doneBy].n):"\u2014")+
+         (tv.doneAt?" \u00b7 "+esc(ago(tv.doneAt)):"")+'</div>'
+        :'')+
+      '<div class="lb">Notes</div>'+
+      ((tv.notes&&tv.notes.length)
+        ? tv.notes.slice().reverse().map(function(n){
+            var w=TECHS[n.by];
+            return'<div style="border-left:2px solid var(--edge);padding:7px 0 7px 11px;'+
+              'margin-bottom:8px"><div style="font-size:13.5px">'+esc(n.text)+'</div>'+
+              '<div style="font-size:11px;color:var(--faint);margin-top:3px">'+
+              (w?esc(w.n):"\u2014")+' \u00b7 '+esc(ago(n.at))+'</div></div>';
+          }).join("")
+        : '<div style="font-size:12.5px;color:var(--faint);padding:4px 0 8px">'+
+          'Nothing yet. Anything you find out while doing this belongs here.</div>')+
+      '<textarea id="tvnote" rows="2" placeholder="Part is on back order until Tuesday"></textarea>'+
+      '<button class="ghost" id="tvaddnote" style="margin-top:8px">Add note</button>'+
+      '<div class="row">'+
+      '<button id="mcancel" style="border:1px solid var(--edge);color:var(--text)">Close</button>'+
+      '<button id="tvdone" style="background:'+(tv.done?"var(--edge)":"var(--pass)")+
+      ';color:'+(tv.done?"var(--text)":"#0B1013")+'">'+
+      (tv.done?"Mark not done":"Mark it done")+'</button></div>'+
       '</div></div>';
   }
   if(m.kind==="ptask"){
@@ -3516,8 +3590,10 @@ function vWork(){
         any++;
         var w=TECHS[t.assignee], od=t.due&&!t.done&&t.due<Date.now();
         var pr=t.prio||"Medium";
+        var nnote=(t.notes||[]).length;
         h+='<button class="pt" data-ptask="'+esc(t.id)+'" style="min-height:62px">'+
-          '<span class="selbox'+(t.done?" on":"")+'" style="flex:none">'+(t.done?"\u2713":"")+'</span>'+
+          '<span class="selbox'+(t.done?" on":"")+'" data-tktick="'+esc(t.id)+'" '+
+          'style="flex:none">'+(t.done?"\u2713":"")+'</span>'+
           (!t.done&&pr!=="Medium"
             ?'<span style="flex:none;width:4px;align-self:stretch;border-radius:2px;'+
              'background:'+prioColor(pr)+'"></span>':'')+
@@ -3532,7 +3608,9 @@ function vWork(){
           (t.due?' \u00b7 <span style="color:'+(od?"var(--fail)":"var(--dim)")+'">'+
             esc(dueLabel(t.due))+'</span>':'')+
           '</div></span>'+
-          '<span class="iconbtn" data-edtask="'+esc(t.id)+'" style="flex:none;color:var(--faint)">\u22ef</span>'+
+          (nnote?'<span style="flex:none;font-size:11px;color:var(--wired);'+
+            'font-weight:700">'+nnote+'\u270E</span>':'')+
+          '<span style="flex:none;color:var(--faint)">\u203a</span>'+
           '</button>';
       });
     }
@@ -5021,25 +5099,51 @@ function bind(){
     if(t){saveTask(t,true);toast("Task removed")}
     render();
   });
-  all("[data-ptask]",function(b){b.addEventListener("click",function(e){
-    if(e.target&&e.target.getAttribute("data-edtask")!==null)return;
-    var t=projTasks(proj()).filter(function(x){return x.id===b.dataset.ptask})[0];
-    if(!t)return;
+  function toggleTask(id){
+    var t=projTasks(proj()).filter(function(x){return x.id===id})[0];
+    if(!t)return null;
     var next=JSON.parse(JSON.stringify(t));
     next.done=!next.done;
     next.doneBy=next.done?S.user.id:null;
     next.doneAt=next.done?Date.now():null;
-    saveTask(next);render();
+    saveTask(next);
+    return next;
+  }
+  all("[data-ptask]",function(b){b.addEventListener("click",function(e){
+    // The tick box is its own control; the rest of the row opens the task.
+    var tgt=e.target;
+    while(tgt&&tgt!==b){
+      if(tgt.getAttribute&&tgt.getAttribute("data-tktick")!==null){
+        var n=toggleTask(tgt.getAttribute("data-tktick"));
+        if(n)toast(n.done?"Ticked off":"Back on the list");
+        render();return;
+      }
+      tgt=tgt.parentNode;
+    }
+    S.modal={kind:"taskview",taskId:b.dataset.ptask};render();
   })});
-  all("[data-edtask]",function(b){b.addEventListener("click",function(e){
-    e.stopPropagation();
-    var t=projTasks(proj()).filter(function(x){return x.id===b.dataset.edtask})[0];
+  on("tvdone","click",function(){
+    var n=toggleTask(S.modal.taskId);
+    if(n)toast(n.done?"Ticked off":"Back on the list");
+    render();
+  });
+  on("tvaddnote","click",function(){
+    var txt=(el("tvnote")?el("tvnote").value:"").trim();
+    if(!txt){toast("Write the note first");return}
+    var t=projTasks(proj()).filter(function(x){return x.id===S.modal.taskId})[0];
+    if(!t)return;
+    var next=JSON.parse(JSON.stringify(t));
+    next.notes=(next.notes||[]).concat([{id:uid(),text:txt,by:S.user.id,at:Date.now()}]);
+    saveTask(next);toast("Note added");render();
+  });
+  on("tvedit","click",function(){
+    var t=projTasks(proj()).filter(function(x){return x.id===S.modal.taskId})[0];
     if(!t)return;
     var days=t.due?String(Math.max(0,Math.round((t.due-Date.now())/86400000))):"";
     S.modal={kind:"ptask",editId:t.id,text:t.text,who:t.assignee||null,
       due:days,unit:t.unit||"",prio:t.prio||"Medium"};
     render();
-  })});
+  });
   on("newpkg","click",function(){
     S.modal={kind:"assign",ids:[],issueIds:[],who:null,
       name:"",due:"",note:"",tasks:""};
@@ -5246,6 +5350,45 @@ function bind(){
     var pt=queue()[S.idx];if(!pt)return;
     setDeleted(pt,false,"");
     loadDraft();toast(pt.tag+" restored");render();
+  });
+  on("edtag","click",function(){
+    var pt=queue()[S.idx];if(!pt)return;
+    S.modal={kind:"edtag",pointId:pt.id,was:pt.tag,wasDesc:pt.desc||"",unit:pt.unit};
+    render();
+  });
+  on("edtagsave","click",function(){
+    var m=S.modal,p=proj();
+    var v=(el("edtagv")?el("edtagv").value:"").trim();
+    var d=(el("eddesc")?el("eddesc").value:"").trim();
+    if(v.length<2){
+      S.modal.val=v;S.modal.desc=d;S.modal.err="Give the point a name.";render();return;
+    }
+    // Unique within the controller, as it has to be on the sheet.
+    var clash=p.points.filter(function(x){
+      return x.id!==m.pointId&&x.unit===m.unit&&!x.deleted&&
+        x.tag.toLowerCase()===v.toLowerCase()})[0];
+    if(clash){
+      S.modal.val=v;S.modal.desc=d;
+      S.modal.err=v+" already exists on "+m.unit+".";render();return;
+    }
+    var pt=p.points.filter(function(x){return x.id===m.pointId})[0];
+    if(!pt){S.modal=null;render();return}
+    if(v!==m.was){
+      var ev={id:uid(),kind:"edit",projectId:S.proj,pointId:pt.id,tag:pt.tag,
+        unit:pt.unit,field:"tag",value:v,prev:{value:pt.tag},
+        by:S.user.id,at:Date.now()};
+      applyEvent(ev);S.queue.push(ev);qAdd(ev);
+    }
+    if(d!==(m.wasDesc||"")){
+      var ev2={id:uid(),kind:"edit",projectId:S.proj,pointId:pt.id,tag:v,
+        unit:pt.unit,field:"desc",value:d,prev:{value:m.wasDesc||""},
+        by:S.user.id,at:Date.now()};
+      applyEvent(ev2);S.queue.push(ev2);qAdd(ev2);
+    }
+    kvSet("projects",S.projects);
+    S.modal=null;loadDraft();
+    toast(v!==m.was?("Renamed to "+v):"Saved");
+    flush();render();
   });
   on("sortbtn","click",function(){S.modal={kind:"sort"};render()});
   all("[data-so]",function(b){b.addEventListener("click",function(){
