@@ -466,10 +466,18 @@ var DATA_VERSION="kokusai-p2p-current-2026-09-19d";
      major change  -> add .1 and zero the rest (1.35 -> 1.4, 1.9 -> 2.0)
    A tech reading this off a phone in a mech room should tell you exactly
    which build they are on. */
-var APP_VERSION="1.22";
+var APP_VERSION="1.23";
 /* Newest first. Keep entries short — this is read on a phone, by someone who
    wants to know whether the thing they are hitting was already fixed. */
 var CHANGELOG=[
+  {v:"1.23", d:"2026-10-30", items:[
+    "Split view on every screen, not just the point list",
+    "Your tasks sit in the side rail on every screen, with a + to add one",
+    "Your tasks is its own tile on the job list, with a screen spanning every job",
+    "Reachable from the menu and the unit list too, not only the job list",
+    "A Coming up section: overdue and upcoming tasks and packages across every job",
+    "Fixed: My account could blank the app if the roster had not loaded"
+  ]},
   {v:"1.22", d:"2026-10-30", items:[
     "Rename a point, and edit its description, from the point screen",
     "Tap a task to open it, add notes, and tick it off from either place"
@@ -596,6 +604,31 @@ function buildDemo(){
         "Need written direction on lead/lag before startup.",
       party:"Engineering",priority:"Medium",hours:"",blocks:false,photos:[],
       at:now-3*day,by:"demo_ms",resolved:false}],
+    // A spread that exercises the task features: overdue, due today, unclaimed,
+    // a finished one, one with notes, and one tied to no controller.
+    tasks:[
+      {id:"demo_t1",text:"Order the replacement flow ring for VAV-12",
+       assignee:"demo_dg",due:now-2*day,prio:"High",unit:"VAV-12",
+       done:false,by:"demo_dg",at:now-3*day,
+       notes:[{id:"demo_n1",text:"Supplier quoted 5 working days. Chased once.",
+               by:"demo_dg",at:now-day}]},
+      {id:"demo_t2",text:"Meet the electrician at the roof hatch",
+       assignee:"demo_dg",due:now+4*3600000,prio:"Medium",unit:"AHU-1",
+       done:false,by:"demo_jr",at:now-day,notes:[]},
+      {id:"demo_t3",text:"Label the AHU-1 panel terminals",
+       assignee:null,due:now+3*day,prio:"Low",unit:"AHU-1",
+       done:false,by:"demo_dg",at:now-day,notes:[]},
+      {id:"demo_t4",text:"Pick up the loaner meter from the shop",
+       assignee:"demo_dg",due:now+day,prio:"Medium",unit:"",
+       done:false,by:"demo_dg",at:now-2*day,notes:[]},
+      {id:"demo_t5",text:"Send the boiler RFI to engineering",
+       assignee:"demo_dg",due:now-day,prio:"High",unit:"BOILER",
+       done:true,doneBy:"demo_dg",doneAt:now-12*3600000,
+       by:"demo_ms",at:now-3*day,notes:[]},
+      {id:"demo_t6",text:"Walk the VAV boxes with the GC before Friday",
+       assignee:"demo_jr",due:now+2*day,prio:"Medium",unit:"",
+       done:false,by:"demo_dg",at:now-day,notes:[]}
+    ],
     packages:[{id:"demo_pk1",name:"VAV-12 — finish and retest",
       assignee:"demo_jr",by:"demo_dg",at:now-day,due:now+2*day,
       note:"Flow issue needs the ceiling opened.",
@@ -1890,19 +1923,106 @@ function railPoints(){
   return h;
 }
 
+function railProjects(){
+  var h='<div class="railhd">Jobs</div>';
+  S.projects.forEach(function(p){
+    var z=stats(p.points);
+    h+='<button class="railrow" data-railj="'+esc(p.id)+'" aria-current="'+
+      (S.proj===p.id)+'">'+
+      '<span class="rn">'+esc(p.name)+'</span>'+
+      '<span class="rs">'+pctDone(p.points)+'% \u00b7 '+z.done+'/'+z.total+
+      (z.flag?' \u00b7 <span style="color:var(--fail)">'+z.flag+' flagged</span>':'')+
+      '</span></button>';
+  });
+  return h;
+}
+var MENU_RAIL=[
+  ["projects","Jobs"],["mytasks","Your tasks"],["work","My work"],["issues","Defects"],
+  ["projset","Project settings"],["log","Recent changes"],
+  ["account","My account"],["howto","Help"],["info","About"],
+  ["device","This device"],["changes","What changed"]
+];
+function railMenu(){
+  var h='<div class="railhd">'+(S.proj&&proj()?esc(proj().name):"Field Checkout")+'</div>';
+  MENU_RAIL.forEach(function(m){
+    if(m[0]==="admin"&&!isAdmin())return;
+    if((m[0]==="issues"||m[0]==="projset")&&!S.proj)return;
+    h+='<button class="railrow" data-railm="'+m[0]+'" aria-current="'+
+      (S.screen===m[0])+'"><span class="rn">'+m[1]+'</span></button>';
+  });
+  if(isAdmin())
+    h+='<button class="railrow" data-railm="admin" aria-current="'+
+      (S.screen==="admin")+'"><span class="rn">Admin</span></button>';
+  return h;
+}
+/* Tasks ride along in the rail on every screen, under whatever list belongs
+   beside the page. On a wide display there is room, and a tech should not
+   have to navigate away from a point to see what else is on them today. */
+function railTasks(){
+  var all=allMyTasks().filter(function(x){return!x.t.done});
+  var now=Date.now();
+  all.sort(function(a,b){
+    var ad=a.t.due||9e15, bd=b.t.due||9e15;
+    if(ad!==bd)return ad-bd;
+    return (PRANK[a.t.prio||"Medium"])-(PRANK[b.t.prio||"Medium"]);
+  });
+  var over=all.filter(function(x){return x.t.due&&x.t.due<now}).length;
+  var h='<div class="railhd" style="display:flex;align-items:center;gap:6px;'+
+    'border-top:1px solid var(--edge)">'+
+    '<span style="flex:1">Your tasks'+(all.length?' \u00b7 '+all.length:'')+
+    (over?' \u00b7 <span style="color:var(--fail)">'+over+' overdue</span>':'')+'</span>'+
+    '<button id="railnewtask" style="color:var(--accent);font-size:16px;'+
+    'line-height:1;padding:0 4px">+</button></div>';
+  if(!all.length)
+    return h+'<div style="padding:12px 14px;font-size:11.5px;color:var(--faint)">'+
+      'Nothing on you right now.</div>';
+  all.slice(0,8).forEach(function(x){
+    var t=x.t, od=t.due&&t.due<now, pr=t.prio||"Medium";
+    h+='<button class="railrow" data-mytask="'+esc(x.p.id)+'|'+esc(t.id)+'" '+
+      'style="display:flex;align-items:center;gap:9px">'+
+      '<span class="selbox" data-mytick="'+esc(x.p.id)+'|'+esc(t.id)+'" '+
+      'style="flex:none;width:19px;height:19px"></span>'+
+      (pr!=="Medium"?'<span style="flex:none;width:3px;align-self:stretch;'+
+        'border-radius:2px;background:'+prioColor(pr)+'"></span>':'')+
+      '<span style="flex:1;min-width:0">'+
+      '<span class="rn" style="font-weight:500">'+esc(t.text)+'</span>'+
+      '<span class="rs">'+
+      (t.unit?esc(t.unit)+' \u00b7 ':'')+
+      (t.due
+        ?'<span style="color:'+(od?"var(--fail)":"var(--dim)")+'">'+esc(dueLabel(t.due))+'</span>'
+        :'no date')+
+      (t.assignee?'':' \u00b7 <span style="color:var(--issue)">unclaimed</span>')+
+      '</span></span></button>';
+  });
+  if(all.length>8)
+    h+='<button class="railrow" data-railm="mytasks" style="color:var(--accent)">'+
+      '<span class="rn">See all '+all.length+'</span></button>';
+  return h;
+}
+
+/* Which list belongs beside each screen. Anything not named here keeps the
+   menu alongside it, so no screen is left as a lone column on a wide display. */
+function railFor(){
+  var top;
+  if(!S.proj)top=railProjects();
+  else if(S.screen==="points")top=railUnits();
+  else if(S.screen==="verify")top=railPoints();
+  else if(S.screen==="units")top=railProjects();
+  else top=railMenu();
+  // The task list is only a duplicate on its own screen.
+  if(S.screen==="mytasks")return top;
+  return top+railTasks();
+}
+
 /* ───────── views ───────── */
 function render(){
   document.documentElement.setAttribute("data-theme",S.theme==="day"?"day":"night");
   var v={signin:vSignin,projects:vProjects,units:vUnits,points:vPoints,verify:vVerify,
          device:vDevice,issues:vIssues,projset:vProjSet,
          more:vMore,account:vAccount,howto:vHowto,info:vInfo,admin:vAdmin,work:vWork,
-         log:vLog,changes:vChanges}[S.screen];
+         log:vLog,changes:vChanges,mytasks:vMyTasks}[S.screen];
   var rail="";
-  var wide=isWide()&&S.user&&!DEMO_BLOCK_SPLIT;
-  if(wide&&S.proj){
-    if(S.screen==="points")rail=railUnits();
-    else if(S.screen==="verify")rail=railPoints();
-  }
+  if(isWide()&&S.user&&!DEMO_BLOCK_SPLIT&&S.screen!=="signin")rail=railFor();
   var h=v();
   // The sign-in screen renders its own, inside its centred layout.
   if(S.screen!=="signin")
@@ -2016,6 +2136,176 @@ function vForgot(){
     '<p style="font-size:12.5px;color:var(--faint)">No email coming through? '+
     'Your admin can set a new password for you directly.</p>');
 }
+/* Everything with a date on it that is yours, across every job, soonest
+   first. Overdue sorts above today, undated work is deliberately absent —
+   this answers "what is on me this week", not "what is outstanding". */
+/* Tasks assigned to this person across every job, treated as a thing in its
+   own right. A tech's own list does not belong to one project. */
+function allMyTasks(){
+  var out=[];
+  S.projects.forEach(function(p){
+    projTasks(p).forEach(function(t){
+      if(t.assignee&&t.assignee!==S.user.id)return;
+      out.push({t:t,p:p});
+    });
+  });
+  return out;
+}
+function myTaskCounts(){
+  var all=allMyTasks(), now=Date.now();
+  var open=all.filter(function(x){return!x.t.done});
+  return{
+    total:all.length,
+    done:all.length-open.length,
+    open:open.length,
+    overdue:open.filter(function(x){return x.t.due&&x.t.due<now}).length,
+    today:open.filter(function(x){
+      return x.t.due&&x.t.due>=now&&x.t.due<now+86400000}).length,
+    unclaimed:open.filter(function(x){return!x.t.assignee}).length,
+    next:open.filter(function(x){return x.t.due}).sort(function(a,b){
+      return a.t.due-b.t.due})[0]
+  };
+}
+function upcomingWork(){
+  var out=[];
+  S.projects.forEach(function(p){
+    projTasks(p).forEach(function(t){
+      if(t.done||!t.due)return;
+      if(t.assignee&&t.assignee!==S.user.id)return;
+      out.push({kind:"task",proj:p,id:t.id,due:t.due,
+        text:t.text,prio:t.prio||"Medium",unit:t.unit||"",
+        who:t.assignee});
+    });
+    packages(p).forEach(function(k){
+      if(k.closed||!k.due)return;
+      if(k.assignee&&k.assignee!==S.user.id)return;
+      var z=pkgStats(p,k);
+      if(!z.left)return;
+      out.push({kind:"pkg",proj:p,id:k.id,due:k.due,
+        text:k.name,prio:"Medium",unit:pkgUnit(p,k),
+        who:k.assignee,left:z.left});
+    });
+  });
+  out.sort(function(a,b){return a.due-b.due});
+  return out;
+}
+function vMyTaskCard(){
+  var c=myTaskCounts();
+  if(!c.total)return "";
+  var pct=c.total?Math.round(c.done/c.total*100):0;
+  var edge=c.overdue?"var(--fail)":(c.today?"var(--issue)":"var(--wired)");
+  return'<div class="proj" style="border-left-color:'+edge+';padding:0;overflow:hidden">'+
+    '<button id="tomytasks" style="display:block;width:100%;text-align:left;padding:14px 14px 12px">'+
+    '<div class="job mono">'+esc(S.user.i)+' \u00b7 ASSIGNED TO YOU</div>'+
+    '<div class="nm">Your tasks</div>'+
+    '<div class="loc">'+
+    (c.open
+      ? c.open+' to do'+
+        (c.overdue?' \u00b7 <span style="color:var(--fail)">'+c.overdue+' overdue</span>':'')+
+        (c.today?' \u00b7 '+c.today+' today':'')
+      : 'All '+c.total+' done')+
+    '</div>'+
+    '<div class="projpct"><b style="color:'+(pct===100?"var(--pass)":"var(--text)")+'">'+
+    pct+'%</b><span>'+c.done+' of '+c.total+' ticked off'+
+    (c.unclaimed?' \u00b7 '+c.unclaimed+' unclaimed':'')+'</span></div>'+
+    '<div class="rail">'+(pct?'<i style="width:'+pct+'%;background:var(--pass)"></i>':'')+'</div>'+
+    (c.next
+      ? '<div class="here" style="color:'+
+        (c.next.t.due<Date.now()?"var(--fail)":"var(--dim)")+'"><i style="background:'+
+        (c.next.t.due<Date.now()?"var(--fail)":"var(--dim)")+'"></i>Next: '+
+        esc(c.next.t.text)+' \u00b7 '+esc(dueLabel(c.next.t.due))+'</div>'
+      : '')+
+    '</button></div>';
+}
+/* The whole list, grouped by job, with the same sort control as My work. */
+function vMyTasks(){
+  var h='<div class="bar"><button class="iconbtn" id="backmyt" aria-label="Back">\u2039</button>'+
+    '<h1>Your tasks<span class="sub">'+esc(S.user.n)+'</span></h1>'+
+    planeBtn()+helpBtn()+'</div>'+strip();
+  var all=allMyTasks();
+  if(!all.length)return h+'<div class="emptyish"><b>Nothing assigned to you</b>'+
+    'Tasks someone sends you, and ones you make yourself, land here.</div>';
+  h+='<div class="grouphd" style="display:flex;align-items:center;gap:8px">'+
+    '<span style="flex:1">'+all.filter(function(x){return!x.t.done}).length+
+    ' to do</span>'+
+    '<button class="sortchip" id="tasksort" style="min-height:32px;padding:4px 11px;'+
+    'font-size:12px">\u2195 '+
+    TASK_SORTS.filter(function(s){return s[0]===S.taskSort})[0][1]+'</button></div>';
+  var byProj={},order=[];
+  all.forEach(function(x){
+    if(!byProj[x.p.id]){byProj[x.p.id]={p:x.p,list:[]};order.push(x.p.id)}
+    byProj[x.p.id].list.push(x.t);
+  });
+  order.forEach(function(pid){
+    var g=byProj[pid];
+    h+='<div class="grouphd">'+esc(g.p.name)+'</div>';
+    sortTasks(g.list).forEach(function(t){
+      var w=TECHS[t.assignee], od=t.due&&!t.done&&t.due<Date.now();
+      var pr=t.prio||"Medium", nnote=(t.notes||[]).length;
+      h+='<button class="pt" data-mytask="'+esc(g.p.id)+'|'+esc(t.id)+'" style="min-height:62px">'+
+        '<span class="selbox'+(t.done?" on":"")+'" data-mytick="'+esc(g.p.id)+'|'+esc(t.id)+'" '+
+        'style="flex:none">'+(t.done?"\u2713":"")+'</span>'+
+        (!t.done&&pr!=="Medium"
+          ?'<span style="flex:none;width:4px;align-self:stretch;border-radius:2px;'+
+           'background:'+prioColor(pr)+'"></span>':'')+
+        '<span class="grow"><span style="font-size:14.5px;'+
+        (t.done?"text-decoration:line-through;opacity:.55":"font-weight:500")+'">'+
+        esc(t.text)+'</span>'+
+        '<div class="who">'+
+        (pr!=="Medium"?'<span style="color:'+prioColor(pr)+';font-weight:700">'+
+          esc(pr.toUpperCase())+'</span> \u00b7 ':'')+
+        (t.unit?esc(t.unit)+' \u00b7 ':'')+
+        (w?esc(w.n.split(" ")[0]):'<span style="color:var(--issue)">unclaimed</span>')+
+        (t.due?' \u00b7 <span style="color:'+(od?"var(--fail)":"var(--dim)")+'">'+
+          esc(dueLabel(t.due))+'</span>':'')+
+        '</div></span>'+
+        (nnote?'<span style="flex:none;font-size:11px;color:var(--wired);'+
+          'font-weight:700">'+nnote+'\u270E</span>':'')+
+        '<span style="flex:none;color:var(--faint)">\u203a</span></button>';
+    });
+  });
+  return h;
+}
+function vUpcoming(){
+  var up=upcomingWork();
+  if(!up.length)return "";
+  var now=Date.now(), soon=now+7*86400000;
+  var overdue=up.filter(function(x){return x.due<now}).length;
+  var today=up.filter(function(x){
+    return x.due>=now&&x.due<now+86400000}).length;
+  var show=up.filter(function(x){return x.due<soon}).slice(0,6);
+  if(!show.length)return "";
+  var h='<div class="card" style="border-color:'+
+    (overdue?"var(--fail)":(today?"var(--issue)":"var(--edge)"))+'">'+
+    '<h3 style="color:'+(overdue?"var(--fail)":"var(--dim)")+'">Coming up</h3>'+
+    '<div style="font-size:12.5px;color:var(--dim);margin-bottom:10px">'+
+    [overdue?('<span style="color:var(--fail);font-weight:600">'+overdue+' overdue</span>'):null,
+     today?(today+" due today"):null,
+     (up.length-overdue-today)?((up.length-overdue-today)+" later"):null]
+     .filter(Boolean).join(" \u00b7 ")+
+    '</div>';
+  show.forEach(function(x){
+    var od=x.due<now;
+    h+='<button class="railrow" data-up="'+esc(x.kind)+'|'+esc(x.proj.id)+'|'+esc(x.id)+'" '+
+      'style="border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px">'+
+      '<span style="flex:none;width:4px;align-self:stretch;border-radius:2px;background:'+
+      (od?"var(--fail)":prioColor(x.prio))+'"></span>'+
+      '<span style="flex:1;min-width:0">'+
+      '<span class="rn">'+esc(x.text)+'</span>'+
+      '<span class="rs">'+esc(x.proj.name)+
+      (x.unit?' \u00b7 '+esc(x.unit):'')+
+      (x.kind==="pkg"?' \u00b7 '+x.left+' left':'')+
+      (x.who?'':' \u00b7 <span style="color:var(--issue)">unclaimed</span>')+
+      '</span></span>'+
+      '<span style="flex:none;font-size:11.5px;font-weight:600;color:'+
+      (od?"var(--fail)":"var(--dim)")+'">'+esc(dueLabel(x.due))+'</span>'+
+      '</button>';
+  });
+  if(up.length>show.length)
+    h+='<button class="ghost" id="upall" style="margin-top:10px">'+
+      'See all '+up.length+' in My work</button>';
+  return h+'</div>';
+}
 function vProjects(){
   var h='<div class="bar"><h1>Your projects<span class="sub">'+esc(S.user.n)+' · '+esc(roleOf(S.user.id))+'</span></h1>'+
     planeBtn()+helpBtn()+
@@ -2032,6 +2322,8 @@ function vProjects(){
       '<button class="ghost" id="newproj">+ New project from P2P sheet</button>';
     return h+'</div>';
   }
+  h+=vMyTaskCard();
+  h+=vUpcoming();
   S.projects.forEach(function(p){
     var z=stats(p.points);
     var open=!!S.open["p:"+p.id];
@@ -2073,6 +2365,7 @@ function bkdnHTML(pts){
   '<div class="bnote">Grey means marked not applicable. N/A counts as settled.</div></div>';
 }
 function vUnits(){
+  if(!proj()){S.screen="projects";return vProjects()}
   var p=proj(),z=stats(p.points),q=S.q.trim().toLowerCase(),cl=claimsNow();
   var us=units().filter(function(u){
     if(!q)return true;
@@ -2087,6 +2380,15 @@ function vUnits(){
   var nOpen=p.points.filter(function(x){return x.issue&&!x.issue.resolved}).length;
   if(nOpen)h+='<button class="banner" id="toiss">⚑ '+nOpen+' open defect'+(nOpen===1?"":"s")+
     ' on this job<span class="arw">›</span></button>';
+  (function(){
+    var c=myTaskCounts();
+    if(!c.open)return;
+    h+='<button class="banner" id="tomytasks2" style="background:rgba(107,164,232,.12);'+
+      'border-color:var(--wired);color:var(--text)">\u2611 '+c.open+' task'+
+      (c.open===1?"":"s")+' assigned to you'+
+      (c.overdue?' \u00b7 <span style="color:var(--fail)">'+c.overdue+' overdue</span>':'')+
+      '<span class="arw" style="color:var(--wired)">\u203a</span></button>';
+  })();
   h+='<button class="allrow" id="toprojset" style="margin-bottom:0">⚙ Project settings, team activity &amp; export'+
     (function(){var a=teamActivity(p).filter(function(x){return x.hour>0}).length;
       return a?' · <span style="color:var(--pass)">'+a+' live now</span>':''})()+'</button>';
@@ -2122,6 +2424,7 @@ function vUnits(){
 }
 
 function vPoints(){
+  if(!proj()){S.screen="projects";return vProjects()}
   var p=proj(),list=unitPts(),z=stats(list),shown=queue();
   var f=[["open","To do",z.left],["flag","Flagged",z.flag],["pass","Verified",z.Pass],["all","All",z.total]];
   var nSel=Object.keys(S.sel).length;
@@ -2288,6 +2591,7 @@ function readingSummary(pt,d){
     (d.cmd===d.obs?"matches":"does not match")+'</span>';
 }
 function vVerify(){
+  if(!proj()){S.screen="projects";return vProjects()}
   var list=queue(),pt=list[S.idx];
   // Reached without a draft — a restored history entry, or a point that left
   // the filter. Rebuild rather than throwing, which would blank the screen.
@@ -3220,6 +3524,7 @@ function defLabel(){
 function defFiltersOn(){return S.defParty!=="any"||S.defPrio!=="any"||
   S.defKind!=="any"||S.defScope!=="any"||S.defStatus!=="any"||S.defCause!=="any"}
 function vIssues(){
+  if(!proj()){S.screen="projects";return vProjects()}
   var p=proj();
   var all=p.points.filter(function(x){return x.issue}).filter(function(x){
     if(S.defParty!=="any"&&x.issue.party!==S.defParty)return false;
@@ -3690,6 +3995,12 @@ function vMore(){
   var h='<div class="bar"><button class="iconbtn" id="backmore" aria-label="Back">‹</button>'+
     '<h1>Menu<span class="sub">'+esc(S.user.n)+' · '+esc(roleOf(S.user.id))+'</span></h1>'+'</div>'+strip();
   var np=openPkgCount();
+  var mtc=myTaskCounts();
+  h+=menuRow("mytasks","\u2611","Your tasks",
+    mtc.open
+      ? (mtc.open+" to do"+(mtc.overdue?
+          ' · <span style="color:var(--fail);font-weight:600">'+mtc.overdue+' overdue</span>':""))
+      : "Everything assigned to you, across every job");
   h+=menuRow("work","▦","My work",
     np?np+" package"+(np===1?"":"s")+" plus your tasks"
       :"Tasks, packages and defects assigned to you");
@@ -3709,7 +4020,9 @@ function vMore(){
   return h;
 }
 function vAccount(){
-  var u=TECHS[S.user.id];
+  // The roster may not have loaded, or this account may not be in the list we
+  // can see. Fall back to the signed-in identity rather than blanking the app.
+  var u=TECHS[S.user.id]||{n:S.user.n||"",i:S.user.i||"",email:"",role:"tech",active:true};
   var h='<div class="bar"><button class="iconbtn" id="backmore2" aria-label="Back">‹</button>'+
     '<h1>My account</h1>'+'</div>'+strip()+'<div class="body">';
   h+='<div class="card"><h3>Who signs your work</h3>'+
@@ -4398,6 +4711,28 @@ function bind(){
   });
 
   /* ---- menu and rollout screens ---- */
+  all("[data-railj]",function(b){b.addEventListener("click",function(){
+    S.proj=b.dataset.railj;S.unit=null;S.pkg=null;S.q="";S.filter="open";
+    S.selecting=false;S.sel={};S.screen="units";
+    if(LIVE)pbSubscribe();
+    render();
+  })});
+  all("[data-railm]",function(b){b.addEventListener("click",function(){
+    var d=b.dataset.railm;
+    if(d==="projects"){S.screen="projects";render();return}
+    if(d==="issues"){S.defFilter="open";S.screen="issues";render();return}
+    if(d==="projset"){
+      S.screen="projset";S.tpl=null;S.tplErr=null;
+      if(LIVE&&S.proj&&online())templateStatus(S.proj).then(function(ok){S.tpl=ok;render()});
+      render();return;
+    }
+    if(d==="log"&&LIVE&&S.proj&&online()){
+      S.logLoading=true;
+      pbLoadEvents(S.proj).then(function(evs){S.log=evs;S.logLoading=false;render()})
+        .catch(function(){S.logLoading=false;render()});
+    }
+    S.screen=d;render();
+  })});
   all("[data-railu]",function(b){b.addEventListener("click",function(){
     S.unit=b.dataset.railu;S.filter="open";S.limit=60;
     S.selecting=false;S.sel={};S.screen="points";claimUnit();render();
@@ -4456,6 +4791,7 @@ function bind(){
   on("backmore2","click",function(){S.screen="more";S.modal=null;render()});
   all("[data-go]",function(b){b.addEventListener("click",function(){
     var d=b.dataset.go;
+    if(d==="mytasks")S._mytFrom="more";
     if((d==="log"||d==="admin")&&LIVE&&S.proj&&online()){
       S.logLoading=true;
       pbLoadEvents(S.proj).then(function(evs){
@@ -4550,6 +4886,50 @@ function bind(){
     }).then(function(){toast("Reset to the imported P2P sheet");render()});
   });
 
+  on("tomytasks","click",function(){S.screen="mytasks";render()});
+  on("tomytasks2","click",function(){S._mytFrom="units";S.screen="mytasks";render()});
+  on("railnewtask","click",function(){
+    if(!S.proj&&S.projects.length)S.proj=S.projects[0].id;
+    S.modal={kind:"ptask",text:"",who:S.user.id,due:"",unit:S.unit||"",prio:"Medium"};
+    render();
+  });
+  on("backmyt","click",function(){
+    S.screen=(S._mytFrom==="units"||S._mytFrom==="more")?S._mytFrom:"projects";
+    S.modal=null;render();
+  });
+  all("[data-mytask]",function(b){b.addEventListener("click",function(e){
+    var bits=b.dataset.mytask.split("|");
+    var tgt=e.target;
+    while(tgt&&tgt!==b){
+      if(tgt.getAttribute&&tgt.getAttribute("data-mytick")!==null){
+        var tb=tgt.getAttribute("data-mytick").split("|");
+        S.proj=tb[0];
+        var n=toggleTask(tb[1]);
+        if(n)toast(n.done?"Ticked off":"Back on the list");
+        render();return;
+      }
+      tgt=tgt.parentNode;
+    }
+    S.proj=bits[0];
+    S.modal={kind:"taskview",taskId:bits[1]};
+    render();
+  })});
+  all("[data-up]",function(b){b.addEventListener("click",function(){
+    var bits=b.dataset.up.split("|");
+    S.proj=bits[1];
+    if(LIVE)pbSubscribe();
+    if(bits[0]==="task"){
+      S.screen="work";S.modal={kind:"taskview",taskId:bits[2]};
+    }else{
+      S.pkg=bits[2];S.unit=null;S.filter="open";S.limit=60;
+      S.selecting=false;S.sel={};S._prev="projects";S.screen="points";
+    }
+    render();
+  })});
+  on("upall","click",function(){
+    if(!S.proj&&S.projects.length)S.proj=S.projects[0].id;
+    S.pkgFilter="mine";S.screen="work";render();
+  });
   all("[data-p]",function(b){b.addEventListener("click",function(){
     S.proj=b.dataset.p;S.unit=null;S.q="";S.filter="open";S.screen="units";
     if(LIVE)pbSubscribe();
